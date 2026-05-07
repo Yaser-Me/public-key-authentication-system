@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+
+database.json
+aeskey_*.bin
+privkey_*.enc
+
+.env
+.vscode/
+.idea/
