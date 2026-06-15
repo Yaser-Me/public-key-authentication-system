@@ -1,5 +1,4 @@
 # Passwordless Authentication Demo  
-### DACS 3101 – Applied Cryptography
 
 This project is a cybersecurity proof-of-concept for passwordless authentication using public-key cryptography. Instead of using passwords, the system verifies the user by checking a signed challenge from a registered device.
 
