@@ -1,7 +1,7 @@
 # Current-State Assessment
 
-Assessment date: 2026-07-22  
-Branch: `upgrade/identity-security-detection-lab`  
+Assessment date: 2026-07-22
+Branch: `upgrade/identity-security-detection-lab`
 Baseline commit: `73d2c0e`
 
 ## Architecture
