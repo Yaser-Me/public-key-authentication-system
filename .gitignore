@@ -9,3 +9,4 @@ privkey_*.enc
 .vscode/
 .idea/
 venv/
+.venv/
