@@ -11,6 +11,18 @@ uncontrolled feature, architecture, or tool expansion. Work remains bounded by
 the active approved phase, and this supporting identity-security project stays
 distinct from the separate Azure/Sentinel flagship project.
 
+## 2026-07-22 — Prefer the simplest secure and testable implementation
+
+**Decision:** The repository will favor solutions that are secure, testable,
+and understandable at the project's current Python and Flask coding level over
+enterprise-style abstraction or architectural complexity.
+
+**Consequences:** Changes should adapt to the existing code and introduce only
+the smallest necessary structure. Any new abstraction must solve a specific
+problem that a simpler approach cannot handle safely. Phase plans must explain
+their complexity and learning fit, and completed work must include a simple
+explanation of anything that may be difficult for a beginner to defend.
+
 ## 2026-07-22 — Phase 0 is characterization-only
 
 **Decision:** Phase 0 preserves and documents the existing system before later

@@ -19,6 +19,40 @@ project phase and the decisions recorded in `docs/decision-log.md`.
   Lab** flagship project. Do not duplicate or replace the flagship's Azure,
   Microsoft Sentinel, cloud-control-plane, or privileged-access scenario.
 
+## Coding level, complexity, and learning fit
+
+- Keep the implementation simple and close to the repository's existing
+  Python, Flask, and `unittest` style. Improve it gradually instead of replacing
+  it with a different architecture.
+- Prefer the simplest correct solution that satisfies the security requirement
+  and acceptance criteria. Security correctness must not be weakened for
+  simplicity.
+- Prefer clear functions, small modules, direct control flow, descriptive
+  variable names, standard Python, Flask's normal features, and straightforward
+  `unittest` tests.
+- Avoid unnecessary abstract base classes, factories, repository or service
+  layers, dependency-injection frameworks, decorative decorators, generic
+  utility systems, excessive configuration, advanced patterns, large
+  inheritance structures, premature optimization, and clever one-line code.
+- Do not split understandable logic across many files or classes without a
+  concrete security or maintainability need. If additional structure is
+  necessary, use the smallest structure that handles the requirement safely.
+- Before adding an abstraction, explain the specific problem it solves, why
+  the existing simple approach is insufficient, and why a simpler alternative
+  would not work.
+- Keep comments natural and useful. Do not rewrite harmless human wording only
+  to make it sound more polished.
+- Do not add enterprise-looking complexity for presentation value. Portfolio
+  value must come from correct controls, clear tests, reproducible evidence,
+  detection and investigation capability, understandable documentation, and
+  the user's ability to explain the work.
+- Every phase plan must include a section named **Complexity and learning fit**.
+  State whether the work matches the current coding level, identify each new
+  concept and why it is needed, and explain how the user can test and understand
+  it.
+- After implementation, identify anything that may be difficult for a beginner
+  to explain and provide a simple explanation.
+
 ## Phase 0 constraints
 
 - Preserve current runtime behavior. Do not change application code merely to
