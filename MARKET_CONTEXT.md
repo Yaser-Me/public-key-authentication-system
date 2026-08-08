@@ -24,19 +24,14 @@ The GitHub repository name may remain unchanged. The portfolio-facing title shou
 
 ### Portfolio role
 
-This repository is the user's strongest compact supporting cybersecurity artifact.
+This repository is intended to become a strong, compact cybersecurity artifact
+that stands on its own product and evidence needs.
 
 It is intended to become a focused, reproducible identity-security project demonstrating secure authentication, device lifecycle controls, security telemetry, detection logic, incident investigation, containment, validation, testing, and technical communication.
 
-It is **not** the user's main flagship project.
-
-The separate approved flagship is:
-
-**Azure Privileged Access Abuse Detection & Recovery Lab**
-
-That project owns the primary Azure, KQL, Microsoft Sentinel, cloud-control-plane, and privileged-access scenario.
-
-This repository should complement the flagship by proving application-level identity-security and detection skills. It must not duplicate the flagship or falsely present itself as enterprise IAM infrastructure.
+It must not falsely present itself as enterprise IAM infrastructure. Decisions
+for this repository must not be limited by the existence or scope of another
+project.
 
 ---
 
@@ -280,12 +275,9 @@ One complete and defensible security workflow is more valuable than many shallow
 - structured JSON identity telemetry;
 - safe attack simulation;
 - local deterministic detection testing;
-- example Microsoft Sentinel KQL;
-- example Splunk SPL;
 - investigation and response documentation;
 - automated tests;
-- CI security checks;
-- Docker-based local reproducibility where useful;
+- automated CI validation;
 - public-safe documentation and evidence.
 
 ### Excluded unless separately approved
@@ -304,7 +296,6 @@ One complete and defensible security workflow is more valuable than many shallow
 - unrelated frontend redesign;
 - large dashboards;
 - multi-cloud scope;
-- replacing the separate Azure/Sentinel flagship;
 - claims of enterprise scale or professional employment experience.
 
 ---
@@ -322,7 +313,7 @@ Codex must:
 - record major design changes in the decision log;
 - stop and report conflicts rather than silently expanding scope.
 
-### Current Phase 0 interpretation
+### Completed Phase 0 interpretation (historical)
 
 Phase 0 is for current-state preservation only:
 
@@ -356,7 +347,7 @@ Codex must not:
 - store server-side private keys;
 - commit secrets, tokens, keys, databases, raw sensitive logs, or personal identifiers;
 - turn the repository into a full WebAuthn project without a separate approved decision;
-- duplicate the cloud flagship's main scenario.
+- limit useful local capabilities because another project covers a related skill.
 
 Codex should challenge proposed changes that increase complexity without proportional market, security, evidence, or interview value.
 
@@ -405,13 +396,14 @@ Codex should leave clear, learnable code and documentation rather than producing
 
 ## 16. Source documents behind this context
 
-This file was derived from:
+This file was originally derived from:
 
 - `VERIFIED_PROFILE(1).md`
 - `MARKET_GATE_DECISION.md`
-- `FLAGSHIP_PROJECT_BLUEPRINT.md`
 - the approved market-aligned upgrade direction for `public-key-authentication-system`
 
-These source documents remain the authority for the candidate profile, market conclusions, flagship-project boundary, evidence standards, and career rationale.
+The approved repository instructions and decision log now control this project's
+product boundaries. The source documents remain context for the candidate
+profile, market conclusions, evidence standards, and career rationale.
 
 This file is the repository-specific translation of that context.

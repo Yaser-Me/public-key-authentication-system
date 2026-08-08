@@ -1,5 +1,9 @@
 # Current-State Assessment
 
+> Historical note: this document records the Phase 0 baseline. Current product
+> assumptions and implemented behavior are recorded in `docs/decision-log.md`
+> and `docs/trustworthy-state-foundation.md`.
+
 Assessment date: 2026-07-22
 Branch: `upgrade/identity-security-detection-lab`
 Baseline commit: `73d2c0e`

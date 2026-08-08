@@ -1,5 +1,6 @@
 import os
 import base64
+import re
 import requests
 
 from crypto_utils import (
@@ -8,10 +9,20 @@ from crypto_utils import (
     generate_aes_key,
     encrypt_private_key,
     decrypt_private_key,
-    compute_device_hash,
 )
 
 BASE_URL = "http://127.0.0.1:5000"
+REQUEST_TIMEOUT_SECONDS = 5
+IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+DEFINITE_REGISTRATION_REJECTION_CODES = {400, 409, 413}
+
+
+def _validate_identifier(value, field_name):
+    if not isinstance(value, str) or not IDENTIFIER_PATTERN.fullmatch(value):
+        raise ValueError(
+            f"{field_name} must be 1-64 characters using letters, numbers, '.', '_' or '-'."
+        )
+    return value
 
 
 def _device_key_paths(user_id: str, device_id: str):
@@ -26,14 +37,57 @@ def _device_key_paths(user_id: str, device_id: str):
     return priv_file, aes_file
 
 
+def _remove_key_files(paths):
+    failures = []
+    for path in paths:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            failures.append(path)
+
+    if failures:
+        raise OSError(f"Could not remove local key files: {', '.join(failures)}")
+
+
+def _write_new_key_files(priv_file, aes_file, encrypted_private_key, aes_key):
+    created_files = []
+    try:
+        with open(priv_file, "x", encoding="utf-8") as file:
+            created_files.append(priv_file)
+            file.write(encrypted_private_key)
+
+        with open(aes_file, "xb") as file:
+            created_files.append(aes_file)
+            file.write(aes_key)
+    except (OSError, UnicodeError):
+        try:
+            _remove_key_files(created_files)
+        except OSError as cleanup_error:
+            raise OSError(
+                "Local key creation failed and its partial files could not be removed."
+            ) from cleanup_error
+        raise
+
+
 def register_device(user_id, device_id):
     """
     Register a device:
        generate RSA + AES keys
        encrypt private key locally
-       compute integrity hash
-       send public key + hash to server
+       send the public key to the server
     """
+    user_id = _validate_identifier(user_id, "user_id")
+    device_id = _validate_identifier(device_id, "device_id")
+    priv_file, aes_file = _device_key_paths(user_id, device_id)
+
+    if os.path.exists(priv_file) or os.path.exists(aes_file):
+        raise FileExistsError(
+            "Refusing to replace existing local key files. "
+            "Key rotation is not implemented yet."
+        )
+
     # RSA keys
     priv_pem, pub_pem = generate_rsa_keypair()
 
@@ -43,30 +97,43 @@ def register_device(user_id, device_id):
     # encrypt private key with AES-GCM
     enc_priv_b64 = encrypt_private_key(aes_key, priv_pem)
 
-    # bind device to user/public key via SHA-256
-    integrity_hash = compute_device_hash(user_id, device_id, pub_pem)
+    # Create both files before contacting the server. If either write fails,
+    # no server-side device is created. Exclusive modes prevent overwriting.
+    _write_new_key_files(priv_file, aes_file, enc_priv_b64, aes_key)
 
-    # store encrypted private key + AES key on disk
-    priv_file, aes_file = _device_key_paths(user_id, device_id)
-
-    with open(priv_file, "w", encoding="utf-8") as f:
-        f.write(enc_priv_b64)
-
-    with open(aes_file, "wb") as f:
-        f.write(aes_key)
-
-    print(f"[+] encrypted private key -> {priv_file}")
-    print(f"[+] AES key -> {aes_file}")
-
-    # send registration info to backend
+    # Send registration info to the backend. If the request raises or times out,
+    # preserve both files because the server may have accepted the registration
+    # before the client lost the response.
     resp = requests.post(f"{BASE_URL}/register_device", json={
         "user_id": user_id,
         "device_id": device_id,
         "public_key_b64": base64.b64encode(pub_pem).decode(),
-        "integrity_hash": integrity_hash,
-    })
+    }, timeout=REQUEST_TIMEOUT_SECONDS)
 
-    return resp.json()
+    if not resp.ok:
+        try:
+            response_data = resp.json()
+        except ValueError:
+            response_data = {
+                "error": f"Registration failed with HTTP {resp.status_code}."
+            }
+
+        if resp.status_code in DEFINITE_REGISTRATION_REJECTION_CODES:
+            # These route outcomes occur before registration or after its
+            # transaction was rolled back. Remove only files created here.
+            _remove_key_files((priv_file, aes_file))
+        elif isinstance(response_data, dict):
+            response_data["warning"] = (
+                "Registration outcome is uncertain; local key files were preserved."
+            )
+        return response_data
+
+    response_data = resp.json()
+
+    print(f"[+] encrypted private key -> {priv_file}")
+    print(f"[+] AES key -> {aes_file}")
+
+    return response_data
 
 
 def _load_private_key(user_id: str, device_id: str) -> bytes:
@@ -100,11 +167,14 @@ def login(user_id, device_id, legacy_private_key_pem=None):
       4 send signature back
     legacy_private_key_pem is ignored kept for GUI only
     """
+    user_id = _validate_identifier(user_id, "user_id")
+    device_id = _validate_identifier(device_id, "device_id")
+
     # request challenge
     resp = requests.post(f"{BASE_URL}/login/request_challenge", json={
         "user_id": user_id,
         "device_id": device_id
-    })
+    }, timeout=REQUEST_TIMEOUT_SECONDS)
 
     data = resp.json()
 
@@ -120,17 +190,13 @@ def login(user_id, device_id, legacy_private_key_pem=None):
     signature = sign_challenge(priv_pem, challenge)
 
 
-    # DEBUG PRINTS for replay attack testing
     signature_b64 = base64.b64encode(signature).decode()
-    print("DEBUG: challenge_b64 =", challenge_b64)
-    print("DEBUG: signature_b64 =", signature_b64)
-
 
     resp2 = requests.post(f"{BASE_URL}/login/verify", json={
         "user_id": user_id,
         "device_id": device_id,
         "challenge": challenge_b64,
-"signature": signature_b64
-    })
+        "signature": signature_b64
+    }, timeout=REQUEST_TIMEOUT_SECONDS)
 
     return resp2.json()
