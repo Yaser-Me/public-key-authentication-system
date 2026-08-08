@@ -1,6 +1,9 @@
-import os
 import base64
+import binascii
+import hashlib
+import os
 
+from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -45,6 +48,45 @@ def sign_challenge(private_key_pem: bytes, challenge: bytes) -> bytes:
     return signature
 
 
+def parse_rsa_public_key(public_key_b64: str):
+    """Validate and normalize a base64-encoded RSA public key."""
+    if not isinstance(public_key_b64, str) or not public_key_b64:
+        raise ValueError("A public key is required.")
+
+    try:
+        public_pem = base64.b64decode(public_key_b64, validate=True)
+        public_key = serialization.load_pem_public_key(public_pem)
+    except (binascii.Error, TypeError, ValueError, UnsupportedAlgorithm) as exc:
+        raise ValueError("The public key is not valid base64-encoded PEM.") from exc
+
+    if not isinstance(public_key, rsa.RSAPublicKey):
+        raise ValueError("Only RSA public keys are supported.")
+    if public_key.key_size < 2048:
+        raise ValueError("RSA public keys must be at least 2048 bits.")
+
+    canonical_pem = public_key.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    canonical_der = public_key.public_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    canonical_b64 = base64.b64encode(canonical_pem).decode("ascii")
+    fingerprint_digest = hashlib.sha256(canonical_der).digest()
+    fingerprint = (
+        "SHA256:"
+        + base64.b64encode(fingerprint_digest).decode("ascii").rstrip("=")
+    )
+    return public_key, canonical_b64, fingerprint
+
+
+def validate_rsa_public_key(public_key_b64: str):
+    """Return the canonical public key and SHA-256 fingerprint."""
+    _, canonical_b64, fingerprint = parse_rsa_public_key(public_key_b64)
+    return canonical_b64, fingerprint
+
+
 def verify_signature(public_key_b64: str, signature: bytes, challenge: bytes) -> bool:
     """
     Verify RSA signature of a challenge.
@@ -53,10 +95,8 @@ def verify_signature(public_key_b64: str, signature: bytes, challenge: bytes) ->
     challenge: original challenge bytes.
     Returns True if valid, False otherwise.
     """
-    public_pem = base64.b64decode(public_key_b64)
-    public_key = serialization.load_pem_public_key(public_pem)
-
     try:
+        public_key, _, _ = parse_rsa_public_key(public_key_b64)
         public_key.verify(
             signature,
             challenge,
@@ -64,7 +104,7 @@ def verify_signature(public_key_b64: str, signature: bytes, challenge: bytes) ->
             hashes.SHA256()
         )
         return True
-    except Exception:
+    except (InvalidSignature, TypeError, ValueError):
         return False
 
 
@@ -106,22 +146,3 @@ def decrypt_private_key(aes_key: bytes, enc_data_b64: str) -> bytes:
     aesgcm = AESGCM(aes_key)
     private_key_pem = aesgcm.decrypt(nonce, ciphertext, associated_data=None)
     return private_key_pem
-
-
-# -----------------------------
-# SHA-256 device binding hash
-# -----------------------------
-
-def compute_device_hash(user_id: str, device_id: str, public_key_pem: bytes) -> str:
-    """
-    Compute a SHA-256 integrity hash binding:
-        user_id || device_id || public_key_pem
-
-    This can be stored on the server to detect tampering or device cloning.
-    Returns hex string.
-    """
-    digest = hashes.Hash(hashes.SHA256())
-    digest.update(user_id.encode("utf-8"))
-    digest.update(device_id.encode("utf-8"))
-    digest.update(public_key_pem)
-    return digest.finalize().hex()

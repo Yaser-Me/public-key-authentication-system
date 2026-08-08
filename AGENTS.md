@@ -14,13 +14,22 @@ project phase and the decisions recorded in `docs/decision-log.md`.
 - Treat it as strategic context, not permission to expand the active phase.
   Explicit approved phase instructions remain authoritative for implementation
   scope.
-- Preserve the distinction between this focused supporting identity-security
-  project and the separate **Azure Privileged Access Abuse Detection & Recovery
-  Lab** flagship project. Do not duplicate or replace the flagship's Azure,
-  Microsoft Sentinel, cloud-control-plane, or privileged-access scenario.
+- Make product and technical decisions from this repository's own verified needs.
+  Do not restrict a useful local capability merely because another project may
+  cover related market skills.
+
+## Approved product assumptions
+
+- The application is local-only and CLI-first. Tkinter remains secondary.
+- The MVP is Windows-first. Keep ordinary Python portable where doing so is simple.
+- One trusted local OS account operates administration, analysis, and the service.
+- Mutually untrusted local OS users and production deployment are outside scope.
 
 ## Coding level, complexity, and learning fit
 
+- Target the level of a strong university student or practical junior developer.
+  The user must be able to understand, explain, modify, test, and troubleshoot
+  every major control.
 - Keep the implementation simple and close to the repository's existing
   Python, Flask, and `unittest` style. Improve it gradually instead of replacing
   it with a different architecture.
@@ -40,6 +49,9 @@ project phase and the decisions recorded in `docs/decision-log.md`.
 - Before adding an abstraction, explain the specific problem it solves, why
   the existing simple approach is insufficient, and why a simpler alternative
   would not work.
+- When security correctness requires an advanced concept, use the smallest
+  understandable implementation and document why the concept is necessary,
+  what unsafe behavior it prevents, and what must be understood to maintain it.
 - Keep comments natural and useful. Do not rewrite harmless human wording only
   to make it sound more polished.
 - Do not add enterprise-looking complexity for presentation value. Portfolio
@@ -53,7 +65,7 @@ project phase and the decisions recorded in `docs/decision-log.md`.
 - After implementation, identify anything that may be difficult for a beginner
   to explain and provide a simple explanation.
 
-## Phase 0 constraints
+## Completed Phase 0 constraints
 
 - Preserve current runtime behavior. Do not change application code merely to
   make a characterization test pass.
@@ -64,6 +76,19 @@ project phase and the decisions recorded in `docs/decision-log.md`.
 - Do not add security scanners, telemetry, rate limiting, storage migrations,
   dependency-policy changes, or application restructuring during Phase 0.
 - Do not commit or push unless the user explicitly requests it.
+
+## Current foundation milestone
+
+- Replace fragile JSON and process-global state with direct, transactional SQLite.
+- Require explicit local state initialization and fail closed for missing,
+  corrupt, or unsupported state.
+- Validate the current HTTP request boundary and registered RSA public keys.
+- Reject duplicate device or public-key registration instead of overwriting
+  identity and revocation state.
+- Preserve the valid RSA challenge-response flow and the useful Phase 0 tests.
+- Keep tests isolated in temporary directories.
+- Do not pull authorized lifecycle, passphrase/OS key storage, challenge expiry,
+  rate limiting, telemetry, detection, or incident response into this milestone.
 
 ## Required checks
 
