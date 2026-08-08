@@ -197,3 +197,11 @@ that make initialization all-or-nothing and safely retryable.
 - [SQLite transaction behavior](https://www.sqlite.org/lang_transaction.html)
 - [SQLite URI filename behavior](https://www.sqlite.org/uri.html)
 - [SQLite integrity and foreign-key check documentation](https://www.sqlite.org/pragma.html)
+
+## Historical note
+
+This document records the completed schema-v1 foundation and its 38-test evidence
+at the time of independent review. The later administrator-controlled lifecycle
+milestone explicitly migrates that state to schema v2; its current design and
+evidence are documented in `administrator-controlled-lifecycle.md`. The historical
+limitations above must not be read as current claims about v2 behavior.

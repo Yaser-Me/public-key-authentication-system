@@ -77,7 +77,7 @@ project phase and the decisions recorded in `docs/decision-log.md`.
   dependency-policy changes, or application restructuring during Phase 0.
 - Do not commit or push unless the user explicitly requests it.
 
-## Current foundation milestone
+## Completed foundation milestone
 
 - Replace fragile JSON and process-global state with direct, transactional SQLite.
 - Require explicit local state initialization and fail closed for missing,
@@ -89,6 +89,24 @@ project phase and the decisions recorded in `docs/decision-log.md`.
 - Keep tests isolated in temporary directories.
 - Do not pull authorized lifecycle, passphrase/OS key storage, challenge expiry,
   rate limiting, telemetry, detection, or incident response into this milestone.
+
+## Administrator-controlled lifecycle milestone
+
+- Use the approved Milestone 1 execution plan for explicit v1-to-v2 migration,
+  local identity creation, scoped enrollment authorization, RSA-PSS proof of
+  possession, sanitized inventory, and terminal reasoned revocation.
+- Keep lifecycle authority in the trusted local administrative CLI. Untrusted HTTP
+  clients must not create identities, bind without authorization and proof, or
+  revoke authenticators.
+- Preserve the existing login challenge-response protocol in this milestone; its
+  RSA-PSS/context redesign, challenge expiry, rate limiting, key-custody redesign,
+  telemetry, detection, investigation, recovery orchestration, sessions, and RBAC
+  remain later work.
+- Use direct SQLite transactions and focused functions. Do not add a migration
+  framework, token framework, ORM, service/repository layer, or application locks.
+- After an enrollment request is sent, keep complete local key material unless the
+  operator explicitly cleans it up after inventory review. Exact retries must not
+  create new trusted state.
 
 ## Required checks
 

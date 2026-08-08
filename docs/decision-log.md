@@ -143,3 +143,37 @@ Client registration no longer creates a server-side device after a partial local
 write, although ambiguous network outcomes still require manual reconciliation.
 These controls stay within the state and request-boundary milestone and do not
 add lifecycle authorization, key-storage redesign, or recovery automation.
+
+## 2026-08-09 — Use local administrator-controlled authenticator binding
+
+**Decision:** The trusted local OS account, through `manage.py`, creates logical
+identities and authorizes one proposed authenticator binding at a time. HTTP
+clients cannot create identities or revoke authenticators. A binding requires a
+high-entropy, scoped, short-lived authorization and RSA-PSS proof of possession of
+the submitted public key.
+
+Authorization consumption and binding creation occur in one SQLite write
+transaction. The authorization stores only a digest of its bearer secret and, on
+successful consumption, the bound public-key fingerprint. This permits exact
+idempotent reconciliation after a lost response without permitting new state after
+expiry. A consumed authorization whose stored binding does not agree fails closed.
+
+**Consequences:** The schema moves explicitly from v1 to v2. Normal runtime
+rejects v1 with `migration_required`; the explicit migration command is the only
+v2-code path allowed to transform v1. Fresh initialization creates v2 directly.
+The client keeps complete key material after every post-send outcome and provides
+an explicit retry path using the existing key. This milestone does not redesign
+private-key storage, login signatures, challenge expiry, telemetry, detection,
+recovery, sessions, RBAC, or a web-administration system.
+
+## 2026-08-09 — Make revocation terminal trusted-local containment
+
+**Decision:** Revocation is a reasoned local CLI action. It preserves the original
+timestamp and reason, clears the current challenge transactionally, and never
+reactivates or replaces the binding key. Repeating revocation is idempotent.
+
+**Consequences:** Inventory exposes only lifecycle information and fingerprints,
+not public keys, challenges, authorization secrets/digests, signatures, or local
+private-key paths. The legacy HTTP revocation endpoint remains non-mutating for
+clear compatibility behavior. Revoking the last active authenticator is allowed
+because containment can take priority over availability.

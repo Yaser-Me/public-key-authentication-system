@@ -1,21 +1,24 @@
 import base64
 import binascii
 import os
-import re
 
 from flask import Flask, jsonify, request
 
-from crypto_utils import validate_rsa_public_key, verify_signature
+from crypto_utils import (
+    validate_rsa_public_key,
+    verify_enrollment_proof,
+    verify_signature,
+)
 from db_utils import (
     DatabaseError,
-    DuplicateDeviceError,
+    EnrollmentDeniedError,
+    bind_authenticator,
     consume_device_challenge,
     get_database_status,
     get_default_database_path,
     get_device,
     issue_device_challenge,
-    register_device,
-    revoke_device,
+    validate_identifier as validate_state_identifier,
 )
 
 
@@ -23,9 +26,10 @@ app = Flask(__name__)
 app.config["DATABASE_PATH"] = str(get_default_database_path())
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024
 
-IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 MAX_PUBLIC_KEY_B64_LENGTH = 8192
 MAX_SIGNATURE_B64_LENGTH = 8192
+MAX_AUTHORIZATION_ID_LENGTH = 128
+MAX_AUTHORIZATION_SECRET_LENGTH = 512
 
 
 class RequestValidationError(ValueError):
@@ -62,10 +66,20 @@ def _request_json(required_fields):
 
 
 def _validate_identifier(value, field_name):
-    if not isinstance(value, str) or not IDENTIFIER_PATTERN.fullmatch(value):
+    try:
+        return validate_state_identifier(value, field_name)
+    except ValueError as exc:
         raise RequestValidationError(
             f"{field_name} must be 1-64 characters using letters, numbers, '.', '_' or '-'.",
             "invalid_identifier",
+        ) from exc
+
+
+def _validate_authorization_field(value, field_name, maximum_length):
+    if not isinstance(value, str) or not value or len(value) > maximum_length:
+        raise RequestValidationError(
+            f"{field_name} is invalid.",
+            "invalid_enrollment_request",
         )
     return value
 
@@ -110,10 +124,9 @@ def home():
         {
             "message": "Passwordless Auth Server Running",
             "endpoints": [
-                "/register_device",
+                "/authenticator/bind",
                 "/login/request_challenge",
                 "/login/verify",
-                "/device/revoke",
             ],
         }
     )
@@ -127,12 +140,29 @@ def health():
     return jsonify({"status": "OK"})
 
 
-@app.route("/register_device", methods=["POST"])
-def register():
+@app.route("/authenticator/bind", methods=["POST"])
+def bind_authenticator_route():
     try:
-        data = _request_json(("user_id", "device_id", "public_key_b64"))
+        data = _request_json(
+            (
+                "user_id",
+                "device_id",
+                "authorization_id",
+                "authorization_secret",
+                "public_key_b64",
+                "enrollment_proof",
+            )
+        )
         user_id = _validate_identifier(data["user_id"], "user_id")
         device_id = _validate_identifier(data["device_id"], "device_id")
+        authorization_id = _validate_authorization_field(
+            data["authorization_id"], "authorization_id", MAX_AUTHORIZATION_ID_LENGTH
+        )
+        authorization_secret = _validate_authorization_field(
+            data["authorization_secret"],
+            "authorization_secret",
+            MAX_AUTHORIZATION_SECRET_LENGTH,
+        )
         public_key_b64 = data["public_key_b64"]
         if not isinstance(public_key_b64, str) or len(public_key_b64) > MAX_PUBLIC_KEY_B64_LENGTH:
             raise RequestValidationError(
@@ -146,31 +176,52 @@ def register():
                 "public_key_b64 is not a supported RSA public key.",
                 "invalid_public_key",
             ) from exc
+        enrollment_proof = _validate_base64(
+            data["enrollment_proof"],
+            "enrollment_proof",
+            max_encoded_length=MAX_SIGNATURE_B64_LENGTH,
+        )
     except RequestValidationError as exc:
         return _error(str(exc), exc.code, 400)
 
+    if not verify_enrollment_proof(
+        canonical_public_key_b64,
+        enrollment_proof,
+        authorization_id,
+        user_id,
+        device_id,
+        fingerprint,
+    ):
+        return _error("Enrollment denied.", "enrollment_denied", 403)
+
     try:
-        register_device(
+        result = bind_authenticator(
             _database_path(),
             user_id,
             device_id,
             canonical_public_key_b64,
             fingerprint,
+            authorization_id,
+            authorization_secret,
         )
-    except DuplicateDeviceError:
-        return _error(
-            "The device identifier or public key is already registered.",
-            "device_already_registered",
-            409,
-        )
+    except EnrollmentDeniedError:
+        return _error("Enrollment denied.", "enrollment_denied", 403)
 
     return jsonify(
         {
-            "status": "success",
-            "public_key_fingerprint": fingerprint,
-            "message": f"Device '{device_id}' registered for '{user_id}'",
+            "status": result["outcome"],
+            "user_id": user_id,
+            "device_id": device_id,
+            "public_key_fingerprint": result["public_key_fingerprint"],
+            "binding_state": result["binding_state"],
         }
     )
+
+
+@app.route("/register_device", methods=["POST"])
+def legacy_register_device_route():
+    """Keep old clients from mutating identity state through the retired route."""
+    return _error("Enrollment denied.", "enrollment_denied", 403)
 
 
 @app.route("/login/request_challenge", methods=["POST"])
@@ -246,22 +297,11 @@ def verify_login():
 
 @app.route("/device/revoke", methods=["POST"])
 def revoke_device_route():
-    """Legacy unauthenticated revocation; authorization is deferred."""
-    try:
-        data = _request_json(("user_id", "device_id"))
-        user_id = _validate_identifier(data["user_id"], "user_id")
-        device_id = _validate_identifier(data["device_id"], "device_id")
-    except RequestValidationError as exc:
-        return _error(str(exc), exc.code, 400)
-
-    if not revoke_device(_database_path(), user_id, device_id):
-        return _error("Device not found.", "device_not_found", 404)
-
-    return jsonify(
-        {
-            "status": "revoked",
-            "message": f"Device '{device_id}' for user '{user_id}' has been revoked",
-        }
+    """Retired because authenticator revocation is trusted local administration."""
+    return _error(
+        "Authenticator revocation is available through the local administration CLI.",
+        "administration_required",
+        403,
     )
 
 
