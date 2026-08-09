@@ -1,27 +1,15 @@
 # Decision Log
 
-## 2026-07-22 — Market context guides strategy, not phase scope
-
-**Decision:** `MARKET_CONTEXT.md` is the repository's strategic source for
-market purpose, portfolio positioning, and evidence priorities. Approved phase
-instructions remain authoritative for implementation scope.
-
-**Consequences:** Market relevance informs decisions but must not cause
-uncontrolled feature, architecture, or tool expansion. Work remains bounded by
-the active approved phase, and this supporting identity-security project stays
-distinct from the separate Azure/Sentinel flagship project.
-
 ## 2026-07-22 — Prefer the simplest secure and testable implementation
 
 **Decision:** The repository will favor solutions that are secure, testable,
-and understandable at the project's current Python and Flask coding level over
-enterprise-style abstraction or architectural complexity.
+and understandable within its existing Python and Flask style over enterprise-style
+abstraction or architectural complexity.
 
 **Consequences:** Changes should adapt to the existing code and introduce only
 the smallest necessary structure. Any new abstraction must solve a specific
-problem that a simpler approach cannot handle safely. Phase plans must explain
-their complexity and learning fit, and completed work must include a simple
-explanation of anything that may be difficult for a beginner to defend.
+problem that a simpler approach cannot handle safely. Security-sensitive changes
+should explain the concrete complexity they introduce and how it is validated.
 
 ## 2026-07-22 — Phase 0 is characterization-only
 
@@ -71,10 +59,6 @@ The MVP is Windows-first while ordinary Python remains portable where simple.
 One trusted local OS account is the administration, service, and analysis trust
 boundary. Mutually untrusted local OS users, enterprise IAM, and production
 deployment are outside scope.
-
-This product decision supersedes the earlier constraint that treated this
-repository as subordinate to a separate flagship project. Other projects do not
-limit useful capabilities here.
 
 **Consequences:** The Tkinter GUI remains secondary. Work proceeds in small,
 coherent milestones based on technical dependency rather than treating an older
@@ -287,3 +271,15 @@ rule format, severity system, or automatic response is introduced. A truncated
 selection is explicitly incomplete. Unverified requests cannot be attributed to a
 person, physical device, or private-key holder, and the invalid-signature threshold
 is a reproducible lab analysis policy rather than a universal security standard.
+
+## 2026-08-09 — Stop feature development after bounded investigation
+
+**Decision:** M1-M6 form the completed local identity-security and secure-engineering
+lab: controlled binding, protected credential custody, hardened authentication,
+terminal revocation and replacement, trustworthy application evidence, and bounded
+evidence-linked investigation. Further feature milestones are not approved by default.
+
+**Consequences:** Subsequent work should improve truthful presentation,
+reproducibility, and public review readiness without changing the settled M1-M6
+security semantics. The repository remains local-only and CLI-first; it will not grow
+into a SIEM, SOC platform, generic detection engine, or enterprise IAM product.

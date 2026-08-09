@@ -3,21 +3,9 @@
 ## Project scope
 
 This repository has evolved from an academic passwordless-authentication demo
-into a local identity-security and secure-engineering lab. Application evidence
-supports that core; any later detection work is conditional and bounded. Work must
-follow the approved project phase and `docs/decision-log.md`.
-
-## Strategic context
-
-- Read `MARKET_CONTEXT.md` before proposing or implementing any project phase.
-- Use it to understand the project's market purpose, portfolio role, and
-  evidence priorities.
-- Treat it as strategic context, not permission to expand the active phase.
-  Explicit approved phase instructions remain authoritative for implementation
-  scope.
-- Make product and technical decisions from this repository's own verified needs.
-  Do not restrict a useful local capability merely because another project may
-  cover related market skills.
+into a local identity-security and secure-engineering lab. M1-M6 are complete:
+the supporting investigation capability is deliberately bounded, and no further
+feature milestone is currently approved. Work must follow `docs/decision-log.md`.
 
 ## Approved product assumptions
 
@@ -26,11 +14,10 @@ follow the approved project phase and `docs/decision-log.md`.
 - One trusted local OS account operates administration, analysis, and the service.
 - Mutually untrusted local OS users and production deployment are outside scope.
 
-## Coding level, complexity, and learning fit
+## Coding style and complexity
 
-- Target the level of a strong university student or practical junior developer.
-  The user must be able to understand, explain, modify, test, and troubleshoot
-  every major control.
+- Keep major security controls understandable, explainable, modifiable, testable,
+  and troubleshootable by a future maintainer.
 - Keep the implementation simple and close to the repository's existing
   Python, Flask, and `unittest` style. Improve it gradually instead of replacing
   it with a different architecture.
@@ -55,16 +42,9 @@ follow the approved project phase and `docs/decision-log.md`.
   what unsafe behavior it prevents, and what must be understood to maintain it.
 - Keep comments natural and useful. Do not rewrite harmless human wording only
   to make it sound more polished.
-- Do not add enterprise-looking complexity for presentation value. Portfolio
-  value must come from correct controls, clear tests, reproducible evidence,
-  detection and investigation capability, understandable documentation, and
-  the user's ability to explain the work.
-- Every phase plan must include a section named **Complexity and learning fit**.
-  State whether the work matches the current coding level, identify each new
-  concept and why it is needed, and explain how the user can test and understand
-  it.
-- After implementation, identify anything that may be difficult for a beginner
-  to explain and provide a simple explanation.
+- Do not add enterprise-looking complexity without a concrete security or
+  maintainability need. Prefer correct controls, clear tests, reproducible
+  evidence, bounded investigation, and understandable documentation.
 
 ## Completed Phase 0 constraints
 
@@ -109,9 +89,9 @@ follow the approved project phase and `docs/decision-log.md`.
 
 ## Completed M5 security-evidence milestone
 
-- Add only application-native evidence that materially explains identity lifecycle
-  and authentication decisions. Identity Security/IAM and Secure Software
-  Development/Security Engineering remain the primary portfolio skills.
+- Keep application-native evidence focused on identity lifecycle and authentication
+  decisions. Monitoring and investigation support the identity-security product;
+  they are not separate product goals.
 - Prefer state mutation and its authoritative success event in the same SQLite
   transaction. Keep observational denials truthful about claimed versus verified
   actors, and fail closed on trusted-state failures.
@@ -122,7 +102,7 @@ follow the approved project phase and `docs/decision-log.md`.
   does not add alerts, dashboards, log shipping, event buses, severity frameworks,
   or SIEM/SOC infrastructure.
 
-## Current M6 bounded findings milestone
+## Completed M6 bounded findings
 
 - Derive findings on demand from committed M5 events; do not persist alerts or add
   a schema migration, background worker, generic rule format, or automatic response.
@@ -135,6 +115,14 @@ follow the approved project phase and `docs/decision-log.md`.
 - Preserve M5 actor assurance: a denial naming a binding does not prove which person,
   physical device, or private key sent it. Keep the implementation substantially
   smaller than the lifecycle and evidence milestones.
+
+## Current state
+
+- Feature development stopped after M6. Future maintenance may improve truthful
+  presentation, reproducibility, repository hygiene, or verified defects without
+  expanding the settled M1-M6 product scope.
+- Do not start another feature milestone, add generic detection/SOC capabilities,
+  or expand the trust model without a new explicit product decision.
 
 ## Milestone process
 

@@ -1,14 +1,19 @@
 # Passwordless Identity Security Lab
 
-A local public-key authentication project evolving into a CLI-first Identity
-Security and Detection application. A registered client signs a server
-challenge, and the Flask API verifies the signature with the stored public key.
+A local, CLI-first identity-security and secure-engineering lab for a bounded
+software-authenticator lifecycle. A registered client signs a server challenge,
+and the Flask API verifies the signature with the stored public key.
+
+Public-key login alone does not govern who may bind an authenticator, how
+credentials are protected, how compromised bindings are revoked or replaced,
+or how security decisions are evidenced. This lab brings those boundaries
+together in one small, testable local system.
 
 The current implementation combines an administrator-controlled local
-authenticator lifecycle, passphrase-protected software credentials, and a
-versioned authentication challenge-response protocol, and application-native
-security evidence. It is a local lab, not enterprise IAM, a SIEM, or a production
-authentication service.
+authenticator lifecycle, passphrase-protected software credentials, a versioned
+authentication challenge-response protocol, application-native security evidence,
+and bounded on-demand identity investigation. It is a local lab, not enterprise
+IAM, a SIEM, or a production authentication service.
 
 ## Authentication flow
 
@@ -49,12 +54,16 @@ access to another protected application.
   reconciliation after a lost response
 - Transactional independent challenge issuance, successful challenge consumption,
   expiry enforcement, and terminal revocation
+- Bounded revoke-first authenticator replacement that preserves old binding history
+  and creates a distinct new binding and credential
 - Duplicate device and public-key rejection
 - Strict JSON, identifier, Base64, public-key, and request-size validation
 - Successful challenge replay protection, including concurrent database updates
 - Structured, sanitized lifecycle and authentication events committed with
   authoritative state transitions where applicable
 - Bounded local JSON event inspection by identity, binding, or event type
+- Bounded, read-only investigation of invalid-proof, replay, and post-revocation
+  evidence with exact event links and explicit limitations
 - Flask JSON API
 - Tkinter desktop client
 - Isolated automated positive, negative, concurrency, and rollback tests
@@ -71,7 +80,6 @@ access to another protected application.
 | `credential_store.py` | Credential-v1 parsing, encryption, and safe local publication |
 | `db_utils.py` | Direct SQLite schema and state operations |
 | `tests/` | Automated unit, route, client, persistence, and CLI tests |
-| `replay_test.py` | Legacy manual replay helper; not reproducible evidence |
 | `docs/administrator-controlled-lifecycle.md` | Milestone security model and evidence |
 | `docs/application-native-security-evidence.md` | Security-event semantics, trust boundary, and evidence |
 | `requirements.txt` | Python dependencies |
@@ -85,6 +93,12 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
+
+`requirements.txt` pins the direct dependency versions validated in a clean local
+Python 3.12.10 environment. Pip still resolves their transitive dependencies at
+install time, so this project does not claim a fully locked transitive environment.
+The CI workflow runs the same requirements path on Python 3.12 for Windows and
+Ubuntu.
 
 Initialize local state:
 
@@ -221,6 +235,66 @@ revocation. Each finding cites exact event IDs and separates facts, interpretati
 and limitations. Expiry and challenge-limit events remain timeline context. If the
 selection is truncated, the output says that earlier activity may affect the result.
 
+## Reviewer path
+
+Use an explicit temporary database and credential directory for a clean local
+walkthrough; do not place generated state or secrets in the repository. Replace
+both the angle-bracket placeholders and the illustrative `C:\path\to\...` locations
+below before running the commands. The commands use the repository virtual
+environment explicitly, so each terminal has the same Python environment. In the
+API terminal, set the database path, initialize it, then start the server:
+
+```powershell
+$env:PKAS_DATABASE_PATH = "C:\path\to\identity_lab.sqlite3"
+.\.venv\Scripts\python.exe manage.py init
+.\.venv\Scripts\python.exe server.py
+```
+
+In a second terminal, create an identity, issue a scoped authorization, and use
+the authorization ID with the normal client enrollment command:
+
+```powershell
+.\.venv\Scripts\python.exe manage.py --database C:\path\to\identity_lab.sqlite3 identity-add <USER_ID>
+.\.venv\Scripts\python.exe manage.py --database C:\path\to\identity_lab.sqlite3 enrollment-issue <USER_ID> <BINDING_ID>
+.\.venv\Scripts\python.exe client.py --credential-directory C:\path\to\credentials enroll <USER_ID> <BINDING_ID> <AUTHORIZATION_ID>
+.\.venv\Scripts\python.exe client.py --credential-directory C:\path\to\credentials login <USER_ID> <BINDING_ID>
+```
+
+`enrollment-issue` displays the bearer secret once; `client.py enroll` prompts
+for it and for a new confirmed passphrase, so neither belongs in command history.
+Successful enrollment reports the expected identity, binding, and fingerprint;
+successful login reports `success`.
+
+For containment and replacement, use `replacement-prepare` with an active old
+binding and a distinct new binding label, then run the same enrollment command for
+the returned replacement authorization:
+
+```powershell
+.\.venv\Scripts\python.exe manage.py --database C:\path\to\identity_lab.sqlite3 replacement-prepare <USER_ID> <OLD_BINDING_ID> <NEW_BINDING_ID> suspected_compromise
+.\.venv\Scripts\python.exe client.py --credential-directory C:\path\to\credentials enroll <USER_ID> <NEW_BINDING_ID> <REPLACEMENT_AUTHORIZATION_ID>
+```
+
+The old binding remains revoked even if replacement enrollment fails or is
+uncertain. Inspect lifecycle state and the resulting evidence with:
+
+```powershell
+.\.venv\Scripts\python.exe manage.py --database C:\path\to\identity_lab.sqlite3 inventory --user-id <USER_ID>
+.\.venv\Scripts\python.exe manage.py --database C:\path\to\identity_lab.sqlite3 events --user-id <USER_ID>
+.\.venv\Scripts\python.exe manage.py --database C:\path\to\identity_lab.sqlite3 investigate --user-id <USER_ID>
+```
+
+`events` returns sanitized, chronological committed evidence. `investigate` is
+read-only and returns only the selected bounded timeline plus supported findings;
+its output distinguishes fact, interpretation, and limitation. A walkthrough is
+not a substitute for the automated evidence. Review the focused suites for the
+replacement/authentication lifecycle, transactional evidence, and findings:
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_auth_flow.py" -v
+.\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_security_events.py" -v
+.\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_security_analysis.py" -v
+```
+
 ## API endpoints
 
 | Endpoint | Method | Purpose |
@@ -243,7 +317,7 @@ git status --short --branch
 
 ## Security limitations
 
-This is a local student-level application under active development, not a
+This is a local educational identity-security and secure-engineering lab, not a
 production authentication service.
 
 - The trusted local OS account is the administrator boundary. This does not

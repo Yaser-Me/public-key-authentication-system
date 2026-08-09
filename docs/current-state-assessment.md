@@ -27,16 +27,6 @@ the locally decrypted private key, verifies it against the registered public
 key, and clears the stored challenge. The API returns a success message but
 does not create an authenticated session or token.
 
-## Market and portfolio context
-
-This repository is currently an academic authentication demonstration. Its
-long-term direction is a market-aligned Identity Security and Detection Lab,
-positioned as a focused supporting portfolio project rather than the separate
-Azure/Sentinel flagship project. Phase 0 only preserves and documents current
-behavior. Later approved phases will connect identity controls, telemetry,
-detection, investigation, containment, and recovery evidence without allowing
-the long-term direction to expand the active phase implicitly.
-
 ## Registration and key storage
 
 Registration generates an RSA key pair and AES key on the client. The encrypted
