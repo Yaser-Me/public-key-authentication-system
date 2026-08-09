@@ -225,3 +225,21 @@ protocol state. Challenge issuance removes expired or consumed rows and caps
 open challenges at eight per binding, keeping durable challenge state bounded
 without a rate-limit system or background cleanup job. This adds no session,
 telemetry, phishing-resistance, hardware-attestation, or compliance claim.
+
+## 2026-08-09 — Use bounded replacement preparation instead of recovery
+
+**Decision:** A trusted local administrator may prepare one authenticator
+replacement by atomically revoking an active old binding and issuing a scoped
+enrollment authorization for a distinct new binding label. The client then uses
+the existing Credential-v1 enrollment and exact-retry behavior to create and
+bind a new key.
+
+**Consequences:** The old key and revocation history remain immutable and a
+failed or uncertain new enrollment never reactivates the old binding. A second
+administrator action against the same old binding observes it as already
+revoked, so it cannot issue a competing replacement authorization. This is a
+containment-oriented lifecycle operation, not generic account recovery, human
+identity proofing, key restoration, backup, or passphrase reset. No new schema
+or replacement-link field is introduced because the existing immutable bindings,
+terminal revocation state, and trusted command output establish the required
+bounded operation without a recovery framework.

@@ -105,6 +105,34 @@ class ManageCliTests(unittest.TestCase):
             first_revoked_at,
         )
 
+    def test_replacement_prepare_revokes_old_binding_and_issues_new_authorization(self):
+        self._run("init")
+        self._run("identity-add", "student1")
+        _, public_key = generate_rsa_keypair()
+        public_key_b64, fingerprint = validate_rsa_public_key(
+            base64.b64encode(public_key).decode("ascii")
+        )
+        register_device(
+            self.database_path, "student1", "old1", public_key_b64, fingerprint
+        )
+
+        exit_code, result = self._run(
+            "replacement-prepare",
+            "student1",
+            "old1",
+            "replacement1",
+            "planned_replacement",
+        )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(result["status"], "prepared")
+        self.assertEqual(result["old_device_id"], "old1")
+        self.assertEqual(result["device_id"], "replacement1")
+        self.assertTrue(result["authorization_secret"])
+        self.assertIn("last active", result["warning"])
+        self.assertTrue(get_device(self.database_path, "student1", "old1")["revoked"])
+        self.assertIsNone(get_device(self.database_path, "student1", "replacement1"))
+
     def test_init_refuses_to_replace_corrupt_state(self):
         corrupt_bytes = b"do not replace this state"
         self.database_path.write_bytes(corrupt_bytes)

@@ -178,12 +178,25 @@ python manage.py enrollment-issue student1 laptop1
 python manage.py enrollment-cancel AUTHORIZATION_ID
 python manage.py inventory --user-id student1
 python manage.py revoke student1 laptop1 suspected_compromise
+python manage.py replacement-prepare student1 old-laptop replacement-laptop suspected_compromise
 ```
 
 `enrollment-issue` displays the authorization ID and bearer secret once. Do not
 place the secret in source code, repository files, or screenshots. It is scoped
 to the supplied identity and binding label, expires after ten minutes by default,
 and is consumed only by a successful committed binding.
+
+`replacement-prepare` is a trusted-local containment action. In one SQLite
+transaction it terminally revokes the old binding and issues an authorization
+for a distinct new binding label. Use the returned authorization with the normal
+`client.py enroll` command so it creates a new Credential-v1 key. If enrollment
+is uncertain, retain that new credential and use `retry-enrollment` with the
+same authorization; the old binding is never reactivated. This is a bounded
+authenticator replacement workflow, not account recovery or human identity
+proofing. If the administrator loses the displayed authorization secret after
+preparation, the old binding remains safely revoked. Inspect inventory, then
+use the explicit `enrollment-issue` command for the still-absent replacement
+label rather than trying to prepare the old binding again.
 
 ## API endpoints
 
@@ -231,8 +244,9 @@ production authentication service.
   the current/pending cleanup state is resumed or resolved. Deletion makes no
   secure-erasure claim.
 - A public key fingerprint can belong to only one device, including after
-  revocation. This intentionally models per-authenticator keys, but recovery and key
-  rotation workflows are not implemented yet.
+  revocation. Replacement creates a distinct new binding and never changes the
+  old binding's key or revocation history. It is not generic account recovery,
+  key backup, or identity re-proofing.
 - Authentication uses `PKAS-AUTH-V2`: a 32-byte server nonce, a 256-bit
   challenge identifier, and RSA-PSS/SHA-256 with MGF1-SHA-256 and
   `PSS.DIGEST_LENGTH`. The signature binds the protocol domain, challenge ID,
