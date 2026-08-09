@@ -215,8 +215,10 @@ def _derive_key(passphrase, salt):
             lanes=ARGON2_LANES,
             memory_cost=ARGON2_MEMORY_KIB,
         ).derive(_passphrase_bytes(passphrase))
-    except UnsupportedAlgorithm as exc:
-        raise CredentialError("storage_unavailable", "Argon2id is unavailable in this environment.") from exc
+    except (UnsupportedAlgorithm, MemoryError) as exc:
+        raise CredentialError(
+            "storage_unavailable", "Credential protection is unavailable in this environment."
+        ) from exc
 
 
 def _rsa_private_key(private_key_pem):
@@ -265,8 +267,10 @@ def create_credential_bytes(private_key_pem, user_id, device_id, passphrase):
             lanes=ARGON2_LANES,
             memory_cost=ARGON2_MEMORY_KIB,
         ).derive(passphrase_bytes)
-    except UnsupportedAlgorithm as exc:
-        raise CredentialError("storage_unavailable", "Argon2id is unavailable in this environment.") from exc
+    except (UnsupportedAlgorithm, MemoryError) as exc:
+        raise CredentialError(
+            "storage_unavailable", "Credential protection is unavailable in this environment."
+        ) from exc
     ciphertext = AESGCM(derived_key).encrypt(
         nonce,
         private_key_der,

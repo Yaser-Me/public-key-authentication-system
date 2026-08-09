@@ -162,12 +162,25 @@ class ClientCredentialTests(unittest.TestCase):
     def test_concurrent_fresh_enrollment_publishes_and_sends_only_winner_key(self):
         barrier = threading.Barrier(2)
         original_link = credential_store.os.link
+        original_argon2id = credential_store.Argon2id
         original_build = client._build_enrollment_payload
         generated_fingerprints = {}
         sent_fingerprints = []
         results = []
         errors = []
         lock = threading.Lock()
+        kdf_lock = threading.Lock()
+
+        class SerializedArgon2id:
+            def __init__(self, *args, **kwargs):
+                self._argon2id = original_argon2id(*args, **kwargs)
+
+            def derive(self, passphrase):
+                # The test exercises publication concurrency. Serializing this
+                # resource-intensive real KDF keeps two test clients from
+                # exhausting a constrained CI runner before they reach it.
+                with kdf_lock:
+                    return self._argon2id.derive(passphrase)
 
         def synchronized_link(source, destination):
             barrier.wait(timeout=10)
@@ -194,7 +207,9 @@ class ClientCredentialTests(unittest.TestCase):
                 with lock:
                     errors.append(exc.code)
 
-        with patch.object(credential_store.os, "link", side_effect=synchronized_link), patch.object(
+        with patch.object(credential_store, "Argon2id", SerializedArgon2id), patch.object(
+            credential_store.os, "link", side_effect=synchronized_link
+        ), patch.object(
             client, "_build_enrollment_payload", side_effect=record_payload
         ), patch("client.requests.post", side_effect=accepted_response):
             first = threading.Thread(target=enroll, name="first")

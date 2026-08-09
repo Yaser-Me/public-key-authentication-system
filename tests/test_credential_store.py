@@ -115,6 +115,14 @@ class CredentialStoreTests(unittest.TestCase):
             )
         self.assertEqual(failed_unlock.exception.code, "credential_unlock_failed_or_corrupt")
 
+    def test_argon2_memory_failure_is_classified_without_creating_a_credential(self):
+        with patch("credential_store.Argon2id", side_effect=MemoryError):
+            with self.assertRaises(CredentialError) as error:
+                create_credential_bytes(
+                    self.private_key_pem, self.user_id, self.device_id, PASSPHRASE
+                )
+        self.assertEqual(error.exception.code, "storage_unavailable")
+
     def test_bounded_reader_requests_only_limit_plus_one(self):
         path = self.root / "oversized.credential"
         path.write_bytes(b"x")
