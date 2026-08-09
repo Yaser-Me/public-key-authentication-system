@@ -306,9 +306,18 @@ class ClientCredentialTests(unittest.TestCase):
         with patch("client.requests.post", side_effect=lambda *args, **kwargs: self._success_response(kwargs["json"])):
             self._register()
         current_before = self._current_path().read_bytes()
+        _, _, fingerprint = load_credential(
+            self._current_path(), self.user_id, self.device_id, PASSPHRASE
+        )
         challenge = Mock()
         challenge.json.return_value = {
-            "challenge": base64.b64encode(b"x" * 32).decode("ascii")
+            "protocol": client.AUTHENTICATION_PROTOCOL,
+            "challenge_id": "A" * 43,
+            "nonce": base64.b64encode(b"x" * 32).decode("ascii"),
+            "user_id": self.user_id,
+            "device_id": self.device_id,
+            "public_key_fingerprint": fingerprint,
+            "expires_at": "2026-01-01T00:05:00+00:00",
         }
 
         with patch("client.requests.post", side_effect=[challenge, client.requests.Timeout()]) as post:
@@ -321,6 +330,82 @@ class ClientCredentialTests(unittest.TestCase):
             result = client.login(self.user_id, self.device_id, PASSPHRASE, self.root)
         self.assertEqual(result["status"], "challenge_unavailable")
         self.assertEqual(post.call_count, 1)
+        self.assertEqual(self._current_path().read_bytes(), current_before)
+
+    def test_login_uses_v2_challenge_context_without_replacing_credential(self):
+        with patch(
+            "client.requests.post",
+            side_effect=lambda *args, **kwargs: self._success_response(kwargs["json"]),
+        ):
+            self._register()
+        current_before = self._current_path().read_bytes()
+        _, _, fingerprint = load_credential(
+            self._current_path(), self.user_id, self.device_id, PASSPHRASE
+        )
+        challenge = Mock()
+        challenge.json.return_value = {
+            "protocol": client.AUTHENTICATION_PROTOCOL,
+            "challenge_id": "A" * 43,
+            "nonce": base64.b64encode(b"x" * 32).decode("ascii"),
+            "user_id": self.user_id,
+            "device_id": self.device_id,
+            "public_key_fingerprint": fingerprint,
+            "expires_at": "2026-01-01T00:05:00+00:00",
+        }
+        verified = Mock()
+        verified.json.return_value = {"status": "success", "message": "Login OK"}
+
+        with patch("client.requests.post", side_effect=[challenge, verified]) as post:
+            result = client.login(self.user_id, self.device_id, PASSPHRASE, self.root)
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(post.call_args_list[0].kwargs["json"], {
+            "protocol": client.AUTHENTICATION_PROTOCOL,
+            "user_id": self.user_id,
+            "device_id": self.device_id,
+        })
+        verification_payload = post.call_args_list[1].kwargs["json"]
+        self.assertEqual(
+            set(verification_payload), {"protocol", "challenge_id", "signature"}
+        )
+        self.assertEqual(verification_payload["protocol"], client.AUTHENTICATION_PROTOCOL)
+        self.assertEqual(verification_payload["challenge_id"], "A" * 43)
+        self.assertEqual(self._current_path().read_bytes(), current_before)
+
+    def test_invalid_challenge_or_verification_response_preserves_credential(self):
+        with patch(
+            "client.requests.post",
+            side_effect=lambda *args, **kwargs: self._success_response(kwargs["json"]),
+        ):
+            self._register()
+        current_before = self._current_path().read_bytes()
+        invalid_challenge = Mock()
+        invalid_challenge.json.return_value = {"protocol": client.AUTHENTICATION_PROTOCOL}
+        with patch("client.requests.post", return_value=invalid_challenge) as post:
+            result = client.login(self.user_id, self.device_id, PASSPHRASE, self.root)
+        self.assertEqual(result["status"], "challenge_unavailable")
+        self.assertEqual(post.call_count, 1)
+
+        _, _, fingerprint = load_credential(
+            self._current_path(), self.user_id, self.device_id, PASSPHRASE
+        )
+        valid_challenge = Mock()
+        valid_challenge.json.return_value = {
+            "protocol": client.AUTHENTICATION_PROTOCOL,
+            "challenge_id": "A" * 43,
+            "nonce": base64.b64encode(b"x" * 32).decode("ascii"),
+            "user_id": self.user_id,
+            "device_id": self.device_id,
+            "public_key_fingerprint": fingerprint,
+            "expires_at": "2026-01-01T00:05:00+00:00",
+        }
+        malformed_verification = Mock()
+        malformed_verification.json.side_effect = ValueError("not json")
+        with patch(
+            "client.requests.post", side_effect=[valid_challenge, malformed_verification]
+        ):
+            result = client.login(self.user_id, self.device_id, PASSPHRASE, self.root)
+        self.assertEqual(result["status"], "authentication_outcome_uncertain")
         self.assertEqual(self._current_path().read_bytes(), current_before)
 
     def test_status_command_does_not_need_a_secret(self):
@@ -368,7 +453,7 @@ class ClientCredentialTests(unittest.TestCase):
         self.assertEqual(status["status"], "current")
         self.assertEqual(status["credential_validation"], "structurally_recognized_not_unlocked")
 
-    def test_login_command_returns_success_exit_code_for_legacy_login_success(self):
+    def test_login_command_returns_success_exit_code_for_v2_login_success(self):
         output = io.StringIO()
         with patch.object(client, "_read_hidden_secret", return_value=PASSPHRASE), patch.object(
             client, "login", return_value={"status": "success", "message": "Login OK"}

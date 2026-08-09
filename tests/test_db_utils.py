@@ -19,14 +19,15 @@ from db_utils import (
     EnrollmentStateError,
     bind_authenticator,
     cancel_enrollment_authorization,
-    consume_device_challenge,
+    consume_authentication_challenge,
     create_identity,
     get_database_status,
+    get_authentication_challenge,
     get_default_database_path,
     get_device,
     get_user,
     initialize_database,
-    issue_device_challenge,
+    issue_authentication_challenge,
     issue_enrollment_authorization,
     list_authenticator_inventory,
     migrate_database,
@@ -64,6 +65,25 @@ def create_v1_database(database_path):
             """
         )
         connection.execute("PRAGMA user_version = 1")
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def create_v2_database(database_path):
+    """Create the exact fresh Milestone 2 schema for the v2-to-v3 test."""
+    connection = sqlite3.connect(database_path)
+    try:
+        connection.execute(
+            "CREATE TABLE users (user_id TEXT PRIMARY KEY, created_at TEXT NOT NULL)"
+        )
+        connection.execute(db_utils.V2_DEVICES_TABLE_SQL)
+        connection.execute(db_utils.ENROLLMENT_AUTHORIZATIONS_TABLE_SQL)
+        connection.execute(
+            "CREATE INDEX enrollment_authorizations_scope_index "
+            "ON enrollment_authorizations (user_id, device_id)"
+        )
+        connection.execute("PRAGMA user_version = 2")
         connection.commit()
     finally:
         connection.close()
@@ -321,13 +341,13 @@ class DatabaseTests(unittest.TestCase):
         finally:
             connection.close()
 
-    def test_initialization_is_idempotent_and_reports_v2_status(self):
+    def test_initialization_is_idempotent_and_reports_v3_status(self):
         self.assertFalse(initialize_database(self.database_path))
 
         status = get_database_status(self.database_path)
 
         self.assertTrue(status["initialized"])
-        self.assertEqual(status["schema_version"], 2)
+        self.assertEqual(status["schema_version"], 3)
         self.assertEqual(status["integrity"], "ok")
         self.assertEqual(status["users"], 0)
         self.assertEqual(status["devices"], 0)
@@ -336,7 +356,7 @@ class DatabaseTests(unittest.TestCase):
         database_path = self.database_path.parent / "initialization-retry.sqlite3"
         with patch.object(
             db_utils,
-            "_validate_v2_schema",
+            "_validate_v3_schema",
             side_effect=DatabaseSchemaError("forced validation failure"),
         ):
             with self.assertRaises(DatabaseOperationError):
@@ -435,7 +455,9 @@ class DatabaseTests(unittest.TestCase):
         active = get_device(self.database_path, "student1", "laptop1")
         self.assertEqual(active["public_key_b64"], active_key)
         self.assertEqual(active["public_key_fingerprint"], active_fingerprint)
-        self.assertEqual(active["challenge"], "Y2hhbGxlbmdl")
+        # A v1 challenge was signed by the retired login protocol and is not
+        # carried into the v3 authentication challenge table.
+        self.assertIsNone(active["challenge"])
         self.assertEqual(active["created_at"], "2026-01-01T00:00:00+00:00")
         self.assertIsNone(active["revoked_at"])
         historical = get_device(self.database_path, "student1", "old1")
@@ -445,6 +467,118 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(historical["created_at"], "2026-01-01T00:00:00+00:00")
         self.assertEqual(historical["revoked_at"], "2026-01-02T00:00:00+00:00")
         self.assertIsNone(historical["revocation_reason"])
+
+    def test_v2_migration_preserves_lifecycle_state_and_retires_legacy_challenge(self):
+        self.database_path.unlink()
+        create_v2_database(self.database_path)
+        public_key_b64, fingerprint = self._public_key_values()
+        connection = sqlite3.connect(self.database_path)
+        try:
+            connection.execute(
+                "INSERT INTO users VALUES (?, ?)",
+                ("student1", "2026-01-01T00:00:00+00:00"),
+            )
+            connection.execute(
+                """
+                INSERT INTO devices VALUES (?, ?, ?, ?, ?, 0, ?, NULL, NULL)
+                """,
+                (
+                    "student1",
+                    "laptop1",
+                    public_key_b64,
+                    fingerprint,
+                    "Y2hhbGxlbmdl",
+                    "2026-01-01T00:00:00+00:00",
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        status = get_database_status(self.database_path)
+        self.assertFalse(status["initialized"])
+        self.assertEqual(status["schema_version"], 2)
+        self.assertEqual(status["integrity"], "migration_required")
+        self.assertTrue(migrate_database(self.database_path))
+
+        current = get_database_status(self.database_path)
+        self.assertTrue(current["initialized"])
+        self.assertEqual(current["schema_version"], 3)
+        migrated = get_device(self.database_path, "student1", "laptop1")
+        self.assertEqual(migrated["public_key_b64"], public_key_b64)
+        self.assertEqual(migrated["public_key_fingerprint"], fingerprint)
+        self.assertIsNone(migrated["challenge"])
+        self.assertFalse(migrate_database(self.database_path))
+
+    def test_failed_v2_to_v3_migration_preserves_retryable_v2_state(self):
+        self.database_path.unlink()
+        create_v2_database(self.database_path)
+        connection = sqlite3.connect(self.database_path)
+        try:
+            connection.execute(
+                "INSERT INTO users VALUES (?, ?)",
+                ("student1", "2026-01-01T00:00:00+00:00"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        def fail_after_legacy_challenge_clear(connection):
+            connection.execute("UPDATE devices SET challenge_b64 = NULL")
+            raise sqlite3.DatabaseError("forced v3 migration failure")
+
+        with patch.object(
+            db_utils,
+            "_apply_v3_schema_changes",
+            side_effect=fail_after_legacy_challenge_clear,
+        ):
+            with self.assertRaises(DatabaseOperationError):
+                migrate_database(self.database_path)
+
+        connection = sqlite3.connect(self.database_path)
+        try:
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            table = connection.execute(
+                "SELECT 1 FROM sqlite_schema WHERE type = 'table' "
+                "AND name = 'authentication_challenges'"
+            ).fetchone()
+        finally:
+            connection.close()
+        self.assertEqual(version, 2)
+        self.assertIsNone(table)
+        self.assertEqual(get_database_status(self.database_path)["integrity"], "migration_required")
+        self.assertTrue(migrate_database(self.database_path))
+
+    def test_counterfeit_v3_challenge_schema_fails_closed(self):
+        connection = sqlite3.connect(self.database_path)
+        try:
+            connection.execute("DROP TABLE authentication_challenges")
+            connection.execute(
+                """
+                CREATE TABLE authentication_challenges (
+                    challenge_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    device_id TEXT NOT NULL,
+                    public_key_fingerprint TEXT NOT NULL,
+                    nonce_b64 TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    consumed_at TEXT,
+                    FOREIGN KEY (user_id, device_id)
+                        REFERENCES devices(user_id, device_id) ON DELETE CASCADE,
+                    CHECK (consumed_at IS NULL OR 1 = 1)
+                )
+                """
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        status = get_database_status(self.database_path)
+        self.assertFalse(status["initialized"])
+        self.assertEqual(status["integrity"], "unavailable")
+        with self.assertRaises(DatabaseSchemaError):
+            migrate_database(self.database_path)
 
     def test_failed_migration_rolls_back_to_v1_and_can_retry(self):
         self.database_path.unlink()
@@ -1041,8 +1175,10 @@ class DatabaseTests(unittest.TestCase):
         self._create_identity()
         public_key_b64, fingerprint = self._public_key_values()
         register_device(self.database_path, "student1", "laptop1", public_key_b64, fingerprint)
-        challenge_b64 = base64.b64encode(b"x" * 32).decode("ascii")
-        self.assertTrue(issue_device_challenge(self.database_path, "student1", "laptop1", challenge_b64))
+        challenge = issue_authentication_challenge(
+            self.database_path, "student1", "laptop1"
+        )
+        self.assertIsNotNone(challenge)
 
         self.assertEqual(
             revoke_authenticator(
@@ -1058,13 +1194,19 @@ class DatabaseTests(unittest.TestCase):
         self.assertTrue(device["revoked"])
         self.assertIsNone(device["challenge"])
         self.assertEqual(device["revocation_reason"], "suspected_compromise")
-        self.assertFalse(issue_device_challenge(self.database_path, "student1", "laptop1", challenge_b64))
+        self.assertIsNone(
+            issue_authentication_challenge(self.database_path, "student1", "laptop1")
+        )
+        self.assertIsNone(
+            get_authentication_challenge(self.database_path, challenge["challenge_id"])
+        )
 
         inventory = list_authenticator_inventory(self.database_path, user_id="student1")
         self.assertEqual(inventory[0]["authenticators"][0]["public_key_fingerprint"], fingerprint)
         inventory_text = repr(inventory)
         self.assertNotIn(public_key_b64, inventory_text)
-        self.assertNotIn(challenge_b64, inventory_text)
+        self.assertNotIn(challenge["nonce_b64"], inventory_text)
+        self.assertNotIn(challenge["challenge_id"], inventory_text)
         self.assertNotIn("secret_digest", inventory_text)
 
         with self.assertRaises(DuplicateDeviceError):
@@ -1074,24 +1216,142 @@ class DatabaseTests(unittest.TestCase):
         self._create_identity()
         public_key_b64, fingerprint = self._public_key_values()
         register_device(self.database_path, "student1", "laptop1", public_key_b64, fingerprint)
-        challenge_b64 = base64.b64encode(b"x" * 32).decode("ascii")
-        self.assertTrue(issue_device_challenge(self.database_path, "student1", "laptop1", challenge_b64))
+        challenge = issue_authentication_challenge(
+            self.database_path, "student1", "laptop1"
+        )
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
             futures = [
                 executor.submit(
-                    consume_device_challenge,
+                    consume_authentication_challenge,
                     self.database_path,
-                    "student1",
-                    "laptop1",
-                    challenge_b64,
+                    challenge["challenge_id"],
                 )
                 for _ in range(2)
             ]
             results = [future.result() for future in futures]
 
         self.assertEqual(sorted(results), [False, True])
-        self.assertIsNone(get_device(self.database_path, "student1", "laptop1")["challenge"])
+        self.assertIsNotNone(
+            get_authentication_challenge(self.database_path, challenge["challenge_id"])[
+                "consumed_at"
+            ]
+        )
+
+    def test_challenge_issuance_bounds_open_state_and_removes_stale_rows(self):
+        self._create_identity()
+        public_key_b64, fingerprint = self._public_key_values()
+        register_device(self.database_path, "student1", "laptop1", public_key_b64, fingerprint)
+        issued_at = "2026-01-01T00:00:00+00:00"
+        with patch.object(db_utils, "utc_now", return_value=issued_at):
+            challenges = [
+                issue_authentication_challenge(
+                    self.database_path, "student1", "laptop1", lifetime_seconds=60
+                )
+                for _ in range(db_utils.MAX_OUTSTANDING_CHALLENGES_PER_BINDING)
+            ]
+            self.assertIsNone(
+                issue_authentication_challenge(
+                    self.database_path, "student1", "laptop1", lifetime_seconds=60
+                )
+            )
+
+        connection = sqlite3.connect(self.database_path)
+        try:
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM authentication_challenges").fetchone()[0],
+                db_utils.MAX_OUTSTANDING_CHALLENGES_PER_BINDING,
+            )
+        finally:
+            connection.close()
+
+        with patch.object(
+            db_utils, "utc_now", return_value="2026-01-01T00:01:00+00:00"
+        ):
+            replacement = issue_authentication_challenge(
+                self.database_path, "student1", "laptop1", lifetime_seconds=60
+            )
+
+        self.assertIsNotNone(replacement)
+        self.assertEqual(len({challenge["challenge_id"] for challenge in challenges}), len(challenges))
+        connection = sqlite3.connect(self.database_path)
+        try:
+            rows = connection.execute(
+                "SELECT challenge_id FROM authentication_challenges"
+            ).fetchall()
+        finally:
+            connection.close()
+        self.assertEqual(rows, [(replacement["challenge_id"],)])
+
+    def test_challenge_expiry_is_checked_after_waiting_for_sqlite_writer(self):
+        self._create_identity()
+        public_key_b64, fingerprint = self._public_key_values()
+        register_device(self.database_path, "student1", "laptop1", public_key_b64, fingerprint)
+        issued_at = "2026-01-01T00:00:00+00:00"
+        with patch.object(db_utils, "utc_now", return_value=issued_at):
+            challenge = issue_authentication_challenge(
+                self.database_path, "student1", "laptop1", lifetime_seconds=600
+            )
+
+        writer = sqlite3.connect(self.database_path)
+        writer.execute("BEGIN IMMEDIATE")
+        begin_attempted = threading.Event()
+        writer_released = threading.Event()
+        timestamp_before_writer_release = threading.Event()
+        result = {}
+        original_open = db_utils._open_existing_database
+
+        def observed_open(database_path):
+            connection = original_open(database_path)
+            return ObservedConnection(connection)
+
+        class ObservedConnection:
+            def __init__(self, connection):
+                self.connection = connection
+
+            def execute(self, statement, *parameters):
+                if statement == "BEGIN IMMEDIATE":
+                    begin_attempted.set()
+                return self.connection.execute(statement, *parameters)
+
+            def rollback(self):
+                self.connection.rollback()
+
+            def close(self):
+                self.connection.close()
+
+        def transaction_time():
+            if not writer_released.is_set():
+                timestamp_before_writer_release.set()
+                return "2026-01-01T00:09:59+00:00"
+            return "2026-01-01T00:10:00+00:00"
+
+        def consume():
+            result["consumed"] = consume_authentication_challenge(
+                self.database_path, challenge["challenge_id"]
+            )
+
+        try:
+            with patch.object(db_utils, "_open_existing_database", side_effect=observed_open):
+                with patch.object(db_utils, "utc_now", side_effect=transaction_time):
+                    thread = threading.Thread(target=consume)
+                    thread.start()
+                    self.assertTrue(begin_attempted.wait(timeout=2))
+                    self.assertFalse(timestamp_before_writer_release.is_set())
+                    writer_released.set()
+                    writer.commit()
+                    thread.join(timeout=5)
+                    self.assertFalse(thread.is_alive())
+        finally:
+            writer.close()
+
+        self.assertFalse(result["consumed"])
+        self.assertFalse(timestamp_before_writer_release.is_set())
+        self.assertIsNone(
+            get_authentication_challenge(self.database_path, challenge["challenge_id"])[
+                "consumed_at"
+            ]
+        )
 
     def test_active_binding_claim_window_orders_claim_before_revocation(self):
         self._create_identity()

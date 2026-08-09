@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import hmac
 import os
@@ -8,13 +9,16 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 DATABASE_ENV_VAR = "PKAS_DATABASE_PATH"
 DATABASE_NAME = "identity_lab.sqlite3"
 APP_DIRECTORY_NAME = "PublicKeyAuthenticationSystem"
 DEFAULT_ENROLLMENT_LIFETIME_SECONDS = 10 * 60
+DEFAULT_CHALLENGE_LIFETIME_SECONDS = 5 * 60
+MAX_OUTSTANDING_CHALLENGES_PER_BINDING = 8
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 AUTHORIZATION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+CHALLENGE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{43}$")
 REVOCATION_REASONS = {
     "lost",
     "suspected_compromise",
@@ -97,6 +101,22 @@ CREATE TABLE enrollment_authorizations (
 )
 """
 
+AUTHENTICATION_CHALLENGES_TABLE_SQL = """
+CREATE TABLE authentication_challenges (
+    challenge_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    public_key_fingerprint TEXT NOT NULL,
+    nonce_b64 TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    consumed_at TEXT,
+    FOREIGN KEY (user_id, device_id)
+        REFERENCES devices(user_id, device_id) ON DELETE CASCADE,
+    CHECK (consumed_at IS NULL OR consumed_at >= created_at)
+)
+"""
+
 
 class DatabaseError(Exception):
     """Base exception for local state failures."""
@@ -111,7 +131,7 @@ class DatabaseSchemaError(DatabaseError):
 
 
 class DatabaseMigrationRequiredError(DatabaseSchemaError):
-    """Raised when a v1 database needs the explicit v1-to-v2 migration."""
+    """Raised when local state needs the explicit migration command."""
 
 
 class DatabaseOperationError(DatabaseError):
@@ -141,6 +161,13 @@ def validate_identifier(value, field_name):
         raise ValueError(
             f"{field_name} must be 1-64 characters using letters, numbers, '.', '_' or '-'."
         )
+    return value
+
+
+def validate_challenge_id(value):
+    """Accept only the fixed 256-bit base64url challenge identifier form."""
+    if not isinstance(value, str) or not CHALLENGE_ID_PATTERN.fullmatch(value):
+        raise ValueError("challenge_id is invalid.")
     return value
 
 
@@ -216,10 +243,10 @@ def _open_raw_database(database_path):
 def _open_existing_database(database_path):
     """Open only the current schema version for normal runtime operations."""
     connection, schema_version = _open_raw_database(database_path)
-    if schema_version == 1:
+    if schema_version in (1, 2):
         connection.close()
         raise DatabaseMigrationRequiredError(
-            "Local state requires the explicit v1-to-v2 migration. "
+            "Local state requires the explicit migration to schema v3. "
             "Run 'python manage.py migrate'."
         )
     if schema_version != SCHEMA_VERSION:
@@ -229,14 +256,14 @@ def _open_existing_database(database_path):
             f"expected {SCHEMA_VERSION}."
         )
     try:
-        _validate_v2_schema(connection)
+        _validate_v3_schema(connection)
     except DatabaseError:
         connection.close()
         raise
     except sqlite3.DatabaseError as exc:
         connection.close()
         raise DatabaseSchemaError(
-            "Local v2 state could not be validated safely."
+            "Local v3 state could not be validated safely."
         ) from exc
     return connection
 
@@ -254,7 +281,7 @@ def _check_existing_database_for_init(path):
     )
 
 
-def _create_v2_schema(connection):
+def _create_v3_schema(connection):
     connection.execute(
         """
         CREATE TABLE users (
@@ -265,6 +292,7 @@ def _create_v2_schema(connection):
     )
     connection.execute(V2_DEVICES_TABLE_SQL)
     _create_enrollment_authorization_schema(connection)
+    _create_authentication_challenge_schema(connection)
     connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
 
@@ -279,8 +307,19 @@ def _create_enrollment_authorization_schema(connection):
     )
 
 
+def _create_authentication_challenge_schema(connection):
+    """Create the explicit v3 authentication challenge state."""
+    connection.execute(AUTHENTICATION_CHALLENGES_TABLE_SQL)
+    connection.execute(
+        """
+        CREATE INDEX authentication_challenges_binding_index
+        ON authentication_challenges (user_id, device_id)
+        """
+    )
+
+
 def initialize_database(database_path=None):
-    """Create v2 local state without replacing existing data."""
+    """Create v3 local state without replacing existing data."""
     path = Path(database_path or get_default_database_path())
 
     try:
@@ -309,8 +348,8 @@ def initialize_database(database_path=None):
         _configure_connection(connection)
         # SQLite DDL needs an explicit transaction for all-or-nothing setup.
         connection.execute("BEGIN IMMEDIATE")
-        _create_v2_schema(connection)
-        _validate_v2_schema(connection)
+        _create_v3_schema(connection)
+        _validate_v3_schema(connection)
         connection.commit()
     except (OSError, sqlite3.DatabaseError, DatabaseError) as exc:
         if connection is not None:
@@ -524,35 +563,81 @@ def _validate_v2_schema(connection):
     )
 
 
+def _validate_v3_schema(connection):
+    """Reject current state missing the v3 authentication challenge controls."""
+    _validate_v2_schema(connection)
+    _require_schema_properties(
+        connection,
+        "authentication_challenges",
+        {
+            "challenge_id",
+            "user_id",
+            "device_id",
+            "public_key_fingerprint",
+            "nonce_b64",
+            "created_at",
+            "expires_at",
+            "consumed_at",
+        },
+        {
+            "challenge_id",
+            "user_id",
+            "device_id",
+            "public_key_fingerprint",
+            "nonce_b64",
+            "created_at",
+            "expires_at",
+        },
+        ("challenge_id",),
+        foreign_key=("user_id", "devices", "user_id"),
+    )
+    _require_supported_table_definition(
+        connection,
+        "authentication_challenges",
+        (AUTHENTICATION_CHALLENGES_TABLE_SQL,),
+    )
+
+
 def _apply_v2_schema_changes(connection):
     """Apply the small, explicit v1-to-v2 schema delta inside a transaction."""
     connection.execute("ALTER TABLE devices ADD COLUMN revocation_reason TEXT")
     _create_enrollment_authorization_schema(connection)
+    connection.execute("PRAGMA user_version = 2")
+
+
+def _apply_v3_schema_changes(connection):
+    """Retire legacy single-challenge state and add explicit v3 challenges."""
+    # Stored v2 challenges were signed by the retired raw PKCS#1 v1.5 protocol.
+    # They cannot become valid v3 authentication state after migration.
+    connection.execute("UPDATE devices SET challenge_b64 = NULL")
+    _create_authentication_challenge_schema(connection)
     connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
 
 def migrate_database(database_path=None):
-    """Explicitly migrate supported v1 local state to v2, or roll back fully."""
+    """Explicitly migrate supported v1 or v2 local state to v3 atomically."""
     path = database_path or get_default_database_path()
     connection, schema_version = _open_raw_database(path)
-    if schema_version != 1:
-        connection.close()
-        if schema_version == SCHEMA_VERSION:
-            # Do not report a damaged v2 file as current merely because its
-            # user_version was changed. Normal runtime validation must succeed.
-            current_connection = _open_existing_database(path)
-            current_connection.close()
-            return False
-        raise DatabaseSchemaError(
-            f"Unsupported database schema version {schema_version}; expected 1."
-        )
-
     try:
         connection.execute("BEGIN IMMEDIATE")
-        _validate_v1_schema(connection)
-        _apply_v2_schema_changes(connection)
+        if schema_version == 1:
+            _validate_v1_schema(connection)
+            _apply_v2_schema_changes(connection)
+            _verify_database_integrity(connection)
+            _validate_v2_schema(connection)
+        elif schema_version == 2:
+            _validate_v2_schema(connection)
+        elif schema_version == SCHEMA_VERSION:
+            _validate_v3_schema(connection)
+            connection.commit()
+            return False
+        else:
+            raise DatabaseSchemaError(
+                f"Unsupported database schema version {schema_version}; expected 1, 2, or {SCHEMA_VERSION}."
+            )
+        _apply_v3_schema_changes(connection)
         _verify_database_integrity(connection)
-        _validate_v2_schema(connection)
+        _validate_v3_schema(connection)
         connection.commit()
         return True
     except DatabaseError:
@@ -601,7 +686,15 @@ def get_database_status(database_path=None):
             _validate_v1_schema(connection)
             status["integrity"] = "migration_required"
             status["error"] = (
-                "Local state requires the explicit v1-to-v2 migration. "
+                "Local state requires the explicit migration to schema v3. "
+                "Run 'python manage.py migrate'."
+            )
+            return status
+        if schema_version == 2:
+            _validate_v2_schema(connection)
+            status["integrity"] = "migration_required"
+            status["error"] = (
+                "Local state requires the explicit migration to schema v3. "
                 "Run 'python manage.py migrate'."
             )
             return status
@@ -613,7 +706,7 @@ def get_database_status(database_path=None):
             )
             return status
 
-        _validate_v2_schema(connection)
+        _validate_v3_schema(connection)
 
         status.update(
             {
@@ -926,12 +1019,10 @@ def _parse_timestamp(timestamp, field_name):
         parsed = datetime.fromisoformat(timestamp)
     except (TypeError, ValueError) as exc:
         raise EnrollmentStateError(
-            f"Local authorization {field_name} timestamp is invalid."
+            f"Local state {field_name} timestamp is invalid."
         ) from exc
     if parsed.tzinfo is None:
-        raise EnrollmentStateError(
-            f"Local authorization {field_name} timestamp is invalid."
-        )
+        raise EnrollmentStateError(f"Local state {field_name} timestamp is invalid.")
     return parsed
 
 
@@ -1230,51 +1321,203 @@ def bind_authenticator(
         connection.close()
 
 
-def issue_device_challenge(database_path, user_id, device_id, challenge_b64):
-    """Set a fresh challenge only when the device exists and is active."""
+def _challenge_expiry(timestamp, lifetime_seconds):
+    return (_parse_timestamp(timestamp, "created") + timedelta(
+        seconds=lifetime_seconds
+    )).isoformat()
+
+
+def _remove_stale_authentication_challenges(connection, timestamp):
+    """Remove consumed or expired v3 challenges during a normal writer transition."""
+    current_time = _parse_timestamp(timestamp, "current")
+    rows = connection.execute(
+        """
+        SELECT challenge_id, expires_at, consumed_at
+        FROM authentication_challenges
+        """
+    ).fetchall()
+    stale_challenge_ids = []
+    for row in rows:
+        if row["consumed_at"] is not None or (
+            _parse_timestamp(row["expires_at"], "challenge expiry") <= current_time
+        ):
+            stale_challenge_ids.append((row["challenge_id"],))
+    if stale_challenge_ids:
+        connection.executemany(
+            "DELETE FROM authentication_challenges WHERE challenge_id = ?",
+            stale_challenge_ids,
+        )
+
+
+def issue_authentication_challenge(
+    database_path, user_id, device_id, lifetime_seconds=DEFAULT_CHALLENGE_LIFETIME_SECONDS
+):
+    """Create one independent v2 challenge for an exact active binding."""
+    validate_identifier(user_id, "user_id")
+    validate_identifier(device_id, "device_id")
+    if not isinstance(lifetime_seconds, int) or lifetime_seconds <= 0:
+        raise ValueError("lifetime_seconds must be a positive integer.")
+
+    challenge_id = secrets.token_urlsafe(32)
+    nonce_b64 = base64.b64encode(os.urandom(32)).decode("ascii")
     connection = _open_existing_database(database_path)
     try:
-        with connection:
-            cursor = connection.execute(
-                """
-                UPDATE devices
-                SET challenge_b64 = ?
-                WHERE user_id = ? AND device_id = ? AND revoked = 0
-                """,
-                (challenge_b64, user_id, device_id),
-            )
-            return cursor.rowcount == 1
-    except sqlite3.DatabaseError as exc:
-        raise DatabaseOperationError("The challenge could not be issued.") from exc
+        connection.execute("BEGIN IMMEDIATE")
+        timestamp = utc_now()
+        binding = connection.execute(
+            """
+            SELECT public_key_fingerprint
+            FROM devices
+            WHERE user_id = ? AND device_id = ? AND revoked = 0
+            """,
+            (user_id, device_id),
+        ).fetchone()
+        if binding is None:
+            connection.rollback()
+            return None
+        _remove_stale_authentication_challenges(connection, timestamp)
+        open_challenge_count = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM authentication_challenges
+            WHERE user_id = ?
+              AND device_id = ?
+              AND consumed_at IS NULL
+            """,
+            (user_id, device_id),
+        ).fetchone()[0]
+        if open_challenge_count >= MAX_OUTSTANDING_CHALLENGES_PER_BINDING:
+            connection.commit()
+            return None
+        expires_at = _challenge_expiry(timestamp, lifetime_seconds)
+        connection.execute(
+            """
+            INSERT INTO authentication_challenges (
+                challenge_id,
+                user_id,
+                device_id,
+                public_key_fingerprint,
+                nonce_b64,
+                created_at,
+                expires_at,
+                consumed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+            """,
+            (
+                challenge_id,
+                user_id,
+                device_id,
+                binding["public_key_fingerprint"],
+                nonce_b64,
+                timestamp,
+                expires_at,
+            ),
+        )
+        connection.commit()
+        return {
+            "challenge_id": challenge_id,
+            "nonce_b64": nonce_b64,
+            "user_id": user_id,
+            "device_id": device_id,
+            "public_key_fingerprint": binding["public_key_fingerprint"],
+            "expires_at": expires_at,
+        }
+    except (EnrollmentStateError, sqlite3.DatabaseError) as exc:
+        _rollback_quietly(connection)
+        raise DatabaseOperationError("The authentication challenge could not be issued.") from exc
     finally:
         connection.close()
 
 
-def consume_device_challenge(database_path, user_id, device_id, challenge_b64):
-    """Atomically consume the current challenge for an active device."""
+def get_authentication_challenge(database_path, challenge_id):
+    """Return stored challenge context for signature verification only."""
+    validate_challenge_id(challenge_id)
     connection = _open_existing_database(database_path)
     try:
-        with connection:
-            cursor = connection.execute(
-                """
-                UPDATE devices
-                SET challenge_b64 = NULL
-                WHERE user_id = ?
-                  AND device_id = ?
-                  AND challenge_b64 = ?
-                  AND revoked = 0
-                """,
-                (user_id, device_id, challenge_b64),
+        row = connection.execute(
+            """
+            SELECT
+                challenges.challenge_id,
+                challenges.user_id,
+                challenges.device_id,
+                challenges.public_key_fingerprint,
+                challenges.nonce_b64,
+                challenges.created_at,
+                challenges.expires_at,
+                challenges.consumed_at,
+                devices.public_key_b64,
+                devices.public_key_fingerprint AS binding_fingerprint,
+                devices.revoked
+            FROM authentication_challenges AS challenges
+            JOIN devices
+              ON devices.user_id = challenges.user_id
+             AND devices.device_id = challenges.device_id
+            WHERE challenges.challenge_id = ?
+            """,
+            (challenge_id,),
+        ).fetchone()
+        if row is not None and row["public_key_fingerprint"] != row["binding_fingerprint"]:
+            raise DatabaseOperationError(
+                "Stored authentication challenge does not match its authenticator binding."
             )
-            return cursor.rowcount == 1
+        return dict(row) if row else None
     except sqlite3.DatabaseError as exc:
-        raise DatabaseOperationError("The challenge could not be consumed.") from exc
+        raise DatabaseOperationError("The authentication challenge could not be read.") from exc
+    finally:
+        connection.close()
+
+
+def consume_authentication_challenge(database_path, challenge_id):
+    """Consume one unexpired v2 challenge only while its binding remains active."""
+    validate_challenge_id(challenge_id)
+    connection = _open_existing_database(database_path)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        timestamp = utc_now()
+        challenge = connection.execute(
+            """
+            SELECT expires_at
+            FROM authentication_challenges
+            WHERE challenge_id = ?
+            """,
+            (challenge_id,),
+        ).fetchone()
+        if challenge is None:
+            connection.rollback()
+            return False
+        expires_at = _parse_timestamp(challenge["expires_at"], "challenge expiry")
+        current_time = _parse_timestamp(timestamp, "current")
+        if expires_at <= current_time:
+            connection.rollback()
+            return False
+        cursor = connection.execute(
+            """
+            UPDATE authentication_challenges
+            SET consumed_at = ?
+            WHERE challenge_id = ?
+              AND consumed_at IS NULL
+              AND EXISTS (
+                  SELECT 1
+                  FROM devices
+                  WHERE devices.user_id = authentication_challenges.user_id
+                    AND devices.device_id = authentication_challenges.device_id
+                    AND devices.public_key_fingerprint = authentication_challenges.public_key_fingerprint
+                    AND devices.revoked = 0
+              )
+            """,
+            (timestamp, challenge_id),
+        )
+        connection.commit()
+        return cursor.rowcount == 1
+    except (EnrollmentStateError, sqlite3.DatabaseError) as exc:
+        _rollback_quietly(connection)
+        raise DatabaseOperationError("The authentication challenge could not be consumed.") from exc
     finally:
         connection.close()
 
 
 def revoke_authenticator(database_path, user_id, device_id, reason):
-    """Terminally revoke a binding and clear its outstanding challenge."""
+    """Terminally revoke a binding and delete its outstanding v3 challenges."""
     validate_identifier(user_id, "user_id")
     validate_identifier(device_id, "device_id")
     validate_revocation_reason(reason)
@@ -1305,6 +1548,13 @@ def revoke_authenticator(database_path, user_id, device_id, reason):
             WHERE user_id = ? AND device_id = ? AND revoked = 0
             """,
             (utc_now(), reason, user_id, device_id),
+        )
+        connection.execute(
+            """
+            DELETE FROM authentication_challenges
+            WHERE user_id = ? AND device_id = ?
+            """,
+            (user_id, device_id),
         )
         connection.commit()
         return "revoked"

@@ -4,9 +4,10 @@ A local public-key authentication project evolving into a CLI-first Identity
 Security and Detection application. A registered client signs a server
 challenge, and the Flask API verifies the signature with the stored public key.
 
-The current milestone establishes an administrator-controlled local
-authenticator lifecycle on top of trustworthy SQLite state. It is a local lab,
-not enterprise IAM or a production authentication service.
+The current implementation combines an administrator-controlled local
+authenticator lifecycle, passphrase-protected software credentials, and a
+versioned authentication challenge-response protocol. It is a local lab, not
+enterprise IAM or a production authentication service.
 
 ## Authentication flow
 
@@ -18,25 +19,26 @@ not enterprise IAM or a production authentication service.
 4. The client signs the versioned enrollment context with RSA-PSS to prove that it
    possesses the submitted public key's private key.
 5. The server atomically creates the binding and consumes the authorization.
-6. The server issues a fresh 32-byte challenge for login.
-7. The client unlocks its private key before requesting and signing the legacy
-   login challenge.
-8. The server verifies the signature and atomically clears the challenge after
-   successful use. A trusted local administrator can terminally revoke a binding.
+6. The server issues a fresh, independently identified 32-byte nonce challenge
+   for one active authenticator binding.
+7. The client unlocks its private key before requesting the challenge and signs
+   the versioned authentication context with RSA-PSS.
+8. The server verifies and atomically consumes that one unexpired challenge. A
+   trusted local administrator can terminally revoke a binding.
 
 The API returns an authentication result but does not create a session or grant
 access to another protected application.
 
 ## Current features
 
-- RSA-2048 challenge-response authentication
+- Versioned RSA-PSS/SHA-256 challenge-response authentication
 - Passphrase-protected local credential-v1 files using Argon2id and AES-256-GCM
 - Authenticated local identity, binding, and fingerprint association for credentials
 - No-overwrite credential publication using complete temporary validation and hard links
 - Server-validated RSA public keys and SHA-256 fingerprints
-- Explicit SQLite initialization, status, and v1-to-v2 migration commands
+- Explicit SQLite initialization, status, and v1/v2-to-v3 migration commands
 - SQLite integrity plus conservative recognition of the application-generated
-  v1/v2 lifecycle schemas on every state open
+  v1/v2/v3 lifecycle schemas on every state open
 - Trusted-local identity creation, inventory, enrollment authorization, and
   reasoned revocation commands
 - High-entropy, digest-stored, scoped, short-lived, single-use enrollment
@@ -44,8 +46,8 @@ access to another protected application.
 - RSA-PSS/SHA-256 proof of possession for new authenticator bindings
 - Atomic authenticator binding and authorization consumption with exact retry
   reconciliation after a lost response
-- Transactional challenge issuance, successful challenge consumption, and
-  terminal revocation
+- Transactional independent challenge issuance, successful challenge consumption,
+  expiry enforcement, and terminal revocation
 - Duplicate device and public-key rejection
 - Strict JSON, identifier, Base64, public-key, and request-size validation
 - Successful challenge replay protection, including concurrent database updates
@@ -86,8 +88,8 @@ python manage.py init
 python manage.py status
 ```
 
-For supported existing v1 SQLite state, stop the local service, make a manual
-copy if desired, then run:
+For supported existing v1 or v2 SQLite state, stop the local service, make a
+manual copy if desired, then run:
 
 ```powershell
 python manage.py migrate
@@ -158,9 +160,9 @@ python manage.py --database C:\path\to\identity_lab.sqlite3 migrate
 
 `init` is idempotent for a valid current schema. It refuses to replace corrupt,
 unreadable, unsupported, or migration-required state. Only `migrate` is allowed
-to interpret supported v1 state. There is intentionally no reset command yet.
+to interpret supported v1 or v2 state. There is intentionally no reset command yet.
 Supported means a canonical schema produced by this application's recognized
-v1 or v2 creation path. Manually rewritten or third-party schemas fail closed,
+v1, v2, or v3 creation path. Manually rewritten or third-party schemas fail closed,
 even if they appear semantically equivalent, because the lifecycle constraints
 cannot safely be inferred from column names or a few sample inserts.
 If the repository contains a legacy `database.json`, default initialization
@@ -189,8 +191,8 @@ and is consumed only by a successful committed binding.
 |---|---|---|
 | `/health` | GET | Report readiness; returns 503 until state is initialized |
 | `/authenticator/bind` | POST | Bind an authorized public key after RSA-PSS proof of possession |
-| `/login/request_challenge` | POST | Issue a fresh challenge |
-| `/login/verify` | POST | Verify and atomically consume a successful challenge |
+| `/login/request_challenge` | POST | Issue a fresh v2 protocol challenge for an active binding |
+| `/login/verify` | POST | Verify and atomically consume one successful v2 protocol challenge |
 
 The retired `/register_device` and `/device/revoke` routes return non-mutating
 errors. Authenticator lifecycle mutation belongs to the trusted local CLI.
@@ -231,11 +233,22 @@ production authentication service.
 - A public key fingerprint can belong to only one device, including after
   revocation. This intentionally models per-authenticator keys, but recovery and key
   rotation workflows are not implemented yet.
-- Challenges do not expire and have no request or verification-attempt limits.
-- Requesting another challenge replaces the previous outstanding challenge.
-- Invalid signatures leave the challenge available for another attempt.
-- The enrollment proof uses versioned RSA-PSS context, but login still signs a
-  raw challenge with RSA PKCS#1 v1.5 until its dedicated hardening milestone.
+- Authentication uses `PKAS-AUTH-V2`: a 32-byte server nonce, a 256-bit
+  challenge identifier, and RSA-PSS/SHA-256 with MGF1-SHA-256 and
+  `PSS.DIGEST_LENGTH`. The signature binds the protocol domain, challenge ID,
+  nonce, logical identity, authenticator binding, and public-key fingerprint.
+- Challenges expire after five minutes. Multiple independent challenges can be
+  outstanding for one active binding; each can succeed only once. Invalid
+  signatures leave an unexpired challenge available for a later valid attempt.
+  Challenge issuance opportunistically deletes consumed or expired rows and
+  permits at most eight open challenges per binding, preventing routine durable
+  challenge-state growth. There is no request or verification-attempt rate limit
+  in this milestone.
+- Legacy raw PKCS#1 v1.5 login requests are retired and fail non-mutatingly;
+  the separate RSA-PSS enrollment proof remains proof-v1.
+- Revocation deletes outstanding v2 challenges in its transaction. A verification
+  whose final consumption transition runs after revocation cannot succeed; a
+  verification already committed before revocation remains historical success.
 - Plain HTTP is limited to loopback; the protocol does not claim protected-channel
   or phishing resistance.
 - The local OS account and application data directory are the current trust
@@ -249,6 +262,6 @@ production authentication service.
 
 See `docs/current-state-assessment.md` for the historical Phase 0 baseline,
 `docs/trustworthy-state-foundation.md` for the historical foundation evidence,
-and `docs/administrator-controlled-lifecycle.md` for current milestone evidence
-and remaining work. See `docs/passphrase-protected-credentials.md` for the
-current credential format, migration behavior, and evidence boundaries.
+and `docs/administrator-controlled-lifecycle.md` for the historical Milestone 1
+scope. See `docs/passphrase-protected-credentials.md` for the current credential
+format, migration behavior, and evidence boundaries.

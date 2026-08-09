@@ -201,3 +201,27 @@ migration requires an exact active local inventory match, claims CURRENT before
 deleting legacy material, and leaves a recognizable blocked state if cleanup is
 interrupted. A later revocation may still permit cleanup when the same binding
 history and fingerprint remain, but never makes that binding usable.
+
+## 2026-08-09 — Replace legacy login with explicit versioned challenges
+
+**Decision:** Retire the raw PKCS#1 v1.5 login challenge protocol and require
+`PKAS-AUTH-V2` for normal authentication. A v3 SQLite table stores independent,
+server-generated 32-byte nonce challenges with a 256-bit opaque identifier,
+identity/binding/fingerprint scope, issuance time, expiry time, and terminal
+consumption timestamp. Authentication signatures use RSA-PSS with SHA-256,
+MGF1-SHA-256, and `PSS.DIGEST_LENGTH` over a deterministic length-prefixed
+protocol domain, challenge identifier, nonce, identity, binding, and fingerprint.
+
+**Consequences:** Multiple login attempts can hold independent challenges; a
+successful conditional consumption creates at most one authentication success.
+Expiry and active-binding state are checked after the SQLite writer transaction
+is acquired, so a stale pre-lock clock cannot extend a challenge. Revocation
+deletes outstanding challenges in its transaction; it prevents a later
+consumption transition but does not rewrite an earlier committed authentication
+result. Invalid signatures preserve an otherwise valid challenge until success
+or expiry. Existing v1/v2 state requires explicit migration to v3; old raw
+challenges are cleared because they cannot be safely reinterpreted as v2
+protocol state. Challenge issuance removes expired or consumed rows and caps
+open challenges at eight per binding, keeping durable challenge state bounded
+without a rate-limit system or background cleanup job. This adds no session,
+telemetry, phishing-resistance, hardware-attestation, or compliance claim.

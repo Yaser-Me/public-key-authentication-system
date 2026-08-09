@@ -4,8 +4,9 @@
 
 Milestone 2 replaces the earlier pair of an AES-GCM ciphertext and adjacent raw
 AES key with one local credential-v1 file. It strengthens software-authenticator
-custody without changing the server enrollment authorization or legacy login
-protocol.
+custody without changing the server enrollment authorization. Its original
+login-protocol boundary is historical: Milestone 3 later changed normal login to
+the versioned RSA-PSS authentication protocol while retaining this custody model.
 
 ## Credential-v1
 

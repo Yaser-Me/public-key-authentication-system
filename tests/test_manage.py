@@ -44,7 +44,7 @@ class ManageCliTests(unittest.TestCase):
         self.assertEqual(migrate_status["status"], "already_current")
         self.assertEqual(ready_exit, 0)
         self.assertEqual(ready_status["status"], "ready")
-        self.assertEqual(ready_status["schema_version"], 2)
+        self.assertEqual(ready_status["schema_version"], 3)
         self.assertEqual(ready_status["integrity"], "ok")
 
     def test_lifecycle_commands_use_sanitized_local_administration(self):
