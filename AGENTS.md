@@ -108,6 +108,25 @@ project phase and the decisions recorded in `docs/decision-log.md`.
   operator explicitly cleans it up after inventory review. Exact retries must not
   create new trusted state.
 
+## Passphrase-protected client credential milestone
+
+- Store new software private keys only in the supported credential-v1 envelope:
+  fixed-profile Argon2id plus AES-GCM around DER PKCS#8, with authenticated
+  identity, binding, and fingerprint metadata. Do not reintroduce adjacent raw
+  AES-key storage or a weaker fallback.
+- Keep credential parsing bounded and closed. Existing credential destinations
+  must never be replaced; use complete validation before no-overwrite publication.
+- Unlock locally before requesting a login challenge. Preserve a complete current
+  credential after any enrollment request may have reached the server, and retry
+  with the same key.
+- Legacy AES/ciphertext files are migration-only. Require an exact trusted binding
+  match before initial migration, claim CURRENT before deleting legacy material,
+  and block routine use while pending cleanup exists. Do not silently fall back to
+  legacy storage.
+- Keep this client work local and CLI-first. Do not pull login-protocol hardening,
+  replacement/recovery orchestration, telemetry, detection, sessions, or key-store
+  integrations into this milestone.
+
 ## Required checks
 
 Use the repository-local virtual environment and run the complete suite before

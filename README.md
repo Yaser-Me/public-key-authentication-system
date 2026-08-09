@@ -13,12 +13,14 @@ not enterprise IAM or a production authentication service.
 1. The trusted local administrator initializes or explicitly migrates SQLite state.
 2. The administrator creates a logical identity and issues one short-lived,
    scoped enrollment authorization.
-3. The client generates an RSA-2048 key pair and encrypts its private key locally.
+3. The client generates an RSA-2048 key pair and stores its private key in a
+   passphrase-protected local credential envelope.
 4. The client signs the versioned enrollment context with RSA-PSS to prove that it
    possesses the submitted public key's private key.
 5. The server atomically creates the binding and consumes the authorization.
 6. The server issues a fresh 32-byte challenge for login.
-7. The client decrypts its private key and signs the legacy login challenge.
+7. The client unlocks its private key before requesting and signing the legacy
+   login challenge.
 8. The server verifies the signature and atomically clears the challenge after
    successful use. A trusted local administrator can terminally revoke a binding.
 
@@ -28,7 +30,9 @@ access to another protected application.
 ## Current features
 
 - RSA-2048 challenge-response authentication
-- AES-256-GCM encryption of the local private-key file
+- Passphrase-protected local credential-v1 files using Argon2id and AES-256-GCM
+- Authenticated local identity, binding, and fingerprint association for credentials
+- No-overwrite credential publication using complete temporary validation and hard links
 - Server-validated RSA public keys and SHA-256 fingerprints
 - Explicit SQLite initialization, status, and v1-to-v2 migration commands
 - SQLite integrity plus conservative recognition of the application-generated
@@ -55,9 +59,10 @@ access to another protected application.
 |---|---|
 | `manage.py` | Trusted-local lifecycle, migration, and state commands |
 | `server.py` | Authenticator binding and challenge-response API |
-| `client.py` | Client binding, retry, and login logic |
+| `client.py` | CLI-first client binding, retry, login, and legacy migration logic |
 | `gui_client.py` | Secondary Tkinter interface |
 | `crypto_utils.py` | RSA, AES-GCM, hashing, signing, and key validation |
+| `credential_store.py` | Credential-v1 parsing, encryption, and safe local publication |
 | `db_utils.py` | Direct SQLite schema and state operations |
 | `tests/` | Automated unit, route, client, persistence, and CLI tests |
 | `replay_test.py` | Legacy manual replay helper; not reproducible evidence |
@@ -108,6 +113,33 @@ In a second terminal, start the secondary desktop client:
 
 ```powershell
 python gui_client.py
+```
+
+The CLI is the primary client interface. It prompts for enrollment capabilities
+and passphrases without putting them in command arguments:
+
+```powershell
+python client.py enroll student1 laptop1 AUTHORIZATION_ID
+python client.py retry-enrollment student1 laptop1 AUTHORIZATION_ID
+python client.py login student1 laptop1
+python client.py credential-status student1 laptop1
+```
+
+New enrollment and legacy migration require a confirmed passphrase of at least
+15 characters. The default credential directory is:
+
+```text
+%LOCALAPPDATA%\PublicKeyAuthenticationSystem\credentials
+```
+
+Use `--credential-directory` only when deliberately working with a separate
+local test/development directory. Legacy files are not used automatically. An
+eligible explicit migration requires a trusted local database and source
+directory:
+
+```powershell
+python client.py --database C:\path\to\identity_lab.sqlite3 legacy-inspect student1 laptop1 --legacy-directory C:\legacy
+python client.py --database C:\path\to\identity_lab.sqlite3 legacy-migrate student1 laptop1 --legacy-directory C:\legacy
 ```
 
 User and device identifiers must be 1-64 characters and contain only letters,
@@ -181,17 +213,21 @@ production authentication service.
 - Enrollment authorization travels over loopback HTTP and is displayed to the
   trusted operator. It is not safe against hostile local accounts, malicious
   local processes, or network attackers.
-- The AES key is stored beside the encrypted private key. The client now avoids
-  overwriting existing keys, but a passphrase- or OS-protected key format is
-  still required.
-- Client key filenames still derive from identifiers and are not yet stored in a
-  dedicated application data directory.
-- Both local key files are created before enrollment. A local write failure is
-  cleaned up before the server is called. Once a request is sent, every denial
-  and uncertain response preserves the complete key pair because a binding may
-  already have committed. `retry_device_enrollment()` can make an exact retry;
-  trusted inventory supports manual reconciliation. Power loss or cleanup failure
-  can still leave partial local state.
+- Local credentials are application-owned passphrase-protected envelopes, not
+  standard encrypted PKCS#8 files. They protect copied credential files only by
+  requiring offline passphrase guessing; they do not protect against same-account
+  malware, keyloggers, process-memory access, or trusted-OS compromise.
+- Credential-v1 uses a fixed Argon2id/AES-GCM profile and authenticated scope
+  metadata. It is not hardware-backed, non-exportable, or a secure-backup format.
+- A new credential is validated before it becomes visible or enrollment HTTP is
+  sent. Existing credential locations are never overwritten. Once a request is
+  sent, every denial and uncertain response preserves the same credential for an
+  exact retry.
+- Legacy AES/ciphertext pairs are used only by explicit inspection/migration. A
+  migration must match an active trusted binding before it claims the current
+  credential location. If cleanup is interrupted, normal client use stops until
+  the current/pending cleanup state is resumed or resolved. Deletion makes no
+  secure-erasure claim.
 - A public key fingerprint can belong to only one device, including after
   revocation. This intentionally models per-authenticator keys, but recovery and key
   rotation workflows are not implemented yet.
@@ -214,4 +250,5 @@ production authentication service.
 See `docs/current-state-assessment.md` for the historical Phase 0 baseline,
 `docs/trustworthy-state-foundation.md` for the historical foundation evidence,
 and `docs/administrator-controlled-lifecycle.md` for current milestone evidence
-and remaining work.
+and remaining work. See `docs/passphrase-protected-credentials.md` for the
+current credential format, migration behavior, and evidence boundaries.

@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, simpledialog
 
 from client import register_device, login
 
@@ -8,7 +8,7 @@ def do_register():
     user_id = entry_user.get().strip()
     device_id = entry_device.get().strip()
     authorization_id = entry_authorization_id.get().strip()
-    authorization_secret = entry_authorization_secret.get().strip()
+    authorization_secret = entry_authorization_secret.get()
 
     if not user_id or not device_id or not authorization_id or not authorization_secret:
         messagebox.showerror(
@@ -17,16 +17,33 @@ def do_register():
         )
         return
 
+    passphrase = simpledialog.askstring(
+        "Credential passphrase", "Choose a credential passphrase:", show="*"
+    )
+    confirmation = simpledialog.askstring(
+        "Credential passphrase", "Confirm the credential passphrase:", show="*"
+    )
+    if passphrase is None or confirmation is None:
+        entry_authorization_secret.delete(0, tk.END)
+        return
+    if passphrase != confirmation:
+        entry_authorization_secret.delete(0, tk.END)
+        messagebox.showerror("Error", "Passphrase confirmation does not match.")
+        return
+
     try:
         resp = register_device(
             user_id,
             device_id,
             authorization_id,
             authorization_secret,
+            passphrase,
         )
         messagebox.showinfo("Register", str(resp))
     except Exception as e:
         messagebox.showerror("Error", f"Registration failed:\n{e}")
+    finally:
+        entry_authorization_secret.delete(0, tk.END)
 
 
 def do_login():
@@ -37,8 +54,13 @@ def do_login():
         messagebox.showerror("Error", "Please enter both user ID and device ID.")
         return
 
+    passphrase = simpledialog.askstring(
+        "Credential passphrase", "Enter the credential passphrase:", show="*"
+    )
+    if passphrase is None:
+        return
     try:
-        resp = login(user_id, device_id)  # private key is loaded from disk inside client.py
+        resp = login(user_id, device_id, passphrase)
         messagebox.showinfo("Login", str(resp))
     except Exception as e:
         messagebox.showerror("Error", f"Login failed:\n{e}")

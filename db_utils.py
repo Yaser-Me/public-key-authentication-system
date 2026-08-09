@@ -870,6 +870,51 @@ def list_authenticator_inventory(database_path, user_id=None, fingerprint=None):
         connection.close()
 
 
+def run_if_binding_active(database_path, user_id, device_id, fingerprint, operation):
+    """Run one short local claim while the exact binding remains active.
+
+    The callback must be limited to the minimum non-database claim operation.
+    This deliberately holds SQLite's normal writer position only long enough to
+    order a local credential claim against a concurrent trusted revocation.
+    """
+    validate_identifier(user_id, "user_id")
+    validate_identifier(device_id, "device_id")
+    if not isinstance(fingerprint, str):
+        raise ValueError("fingerprint is required.")
+    if not callable(operation):
+        raise ValueError("operation must be callable.")
+
+    connection = _open_existing_database(database_path)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        binding = connection.execute(
+            """
+            SELECT revoked, public_key_fingerprint
+            FROM devices
+            WHERE user_id = ? AND device_id = ?
+            """,
+            (user_id, device_id),
+        ).fetchone()
+        if (
+            binding is None
+            or binding["revoked"]
+            or binding["public_key_fingerprint"] != fingerprint
+        ):
+            connection.rollback()
+            return False
+        result = operation()
+        connection.rollback()
+        return result
+    except sqlite3.DatabaseError as exc:
+        _rollback_quietly(connection)
+        raise DatabaseOperationError("Authenticator claim check could not be completed.") from exc
+    except Exception:
+        _rollback_quietly(connection)
+        raise
+    finally:
+        connection.close()
+
+
 def _authorization_secret_digest(secret):
     if not isinstance(secret, str) or not secret or len(secret) > 512:
         raise EnrollmentDeniedError()

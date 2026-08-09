@@ -177,3 +177,27 @@ not public keys, challenges, authorization secrets/digests, signatures, or local
 private-key paths. The legacy HTTP revocation endpoint remains non-mutating for
 clear compatibility behavior. Revoking the last active authenticator is allowed
 because containment can take priority over availability.
+
+## 2026-08-09 — Use a bounded passphrase-protected client credential envelope
+
+**Decision:** Replace adjacent AES-key storage with one application-owned
+credential-v1 envelope containing DER PKCS#8 RSA private-key material. The
+envelope uses fixed-profile Argon2id and AES-256-GCM with deterministic,
+length-prefixed associated data for the exact logical identity, binding label,
+and public-key fingerprint. It has a closed parser, bounded reads, and no
+file-controlled KDF parameters.
+
+New credentials are completely written, reopened, and validated before a
+same-directory hard link claims the final no-overwrite path. The client only
+contacts the enrollment service after this succeeds, and preserves the same key
+after every post-send outcome. Login unlocks locally before requesting a
+challenge.
+
+**Consequences:** This is an application envelope containing PKCS#8 material,
+not a standard encrypted PKCS#8 format. It reduces exposure from copied local
+credential files but does not defend against same-account malware or trusted-OS
+compromise. Legacy AES/ciphertext files are never used routinely. Explicit
+migration requires an exact active local inventory match, claims CURRENT before
+deleting legacy material, and leaves a recognizable blocked state if cleanup is
+interrupted. A later revocation may still permit cleanup when the same binding
+history and fingerprint remain, but never makes that binding usable.
