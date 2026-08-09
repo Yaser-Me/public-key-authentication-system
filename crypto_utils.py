@@ -11,6 +11,20 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 # RSA key generation & signatures
 
+ENROLLMENT_PROOF_DOMAIN = b"PKAS-ENROLLMENT-PROOF-V1"
+
+
+def _enrollment_proof_message(authorization_id, user_id, device_id, fingerprint):
+    """Encode enrollment context unambiguously before signing it."""
+    values = (authorization_id, user_id, device_id, fingerprint)
+    encoded_values = []
+    for value in values:
+        if not isinstance(value, str):
+            raise ValueError("Enrollment proof fields must be text.")
+        encoded = value.encode("utf-8")
+        encoded_values.append(len(encoded).to_bytes(4, "big") + encoded)
+    return ENROLLMENT_PROOF_DOMAIN + b"".join(encoded_values)
+
 
 def generate_rsa_keypair():
     """
@@ -46,6 +60,23 @@ def sign_challenge(private_key_pem: bytes, challenge: bytes) -> bytes:
         hashes.SHA256()
     )
     return signature
+
+
+def sign_enrollment_proof(
+    private_key_pem: bytes, authorization_id, user_id, device_id, fingerprint
+) -> bytes:
+    """Sign the fixed proof-v1 enrollment context with RSA-PSS and SHA-256."""
+    private_key = serialization.load_pem_private_key(private_key_pem, password=None)
+    if not isinstance(private_key, rsa.RSAPrivateKey):
+        raise ValueError("Only RSA private keys can create enrollment proofs.")
+    return private_key.sign(
+        _enrollment_proof_message(authorization_id, user_id, device_id, fingerprint),
+        padding.PSS(
+            mgf=padding.MGF1(hashes.SHA256()),
+            salt_length=padding.PSS.DIGEST_LENGTH,
+        ),
+        hashes.SHA256(),
+    )
 
 
 def parse_rsa_public_key(public_key_b64: str):
@@ -106,6 +137,51 @@ def verify_signature(public_key_b64: str, signature: bytes, challenge: bytes) ->
         return True
     except (InvalidSignature, TypeError, ValueError):
         return False
+
+
+def verify_enrollment_proof(
+    public_key_b64: str,
+    signature: bytes,
+    authorization_id,
+    user_id,
+    device_id,
+    fingerprint,
+) -> bool:
+    """Verify the dedicated RSA-PSS enrollment proof without changing login."""
+    try:
+        public_key, _, _ = parse_rsa_public_key(public_key_b64)
+        public_key.verify(
+            signature,
+            _enrollment_proof_message(
+                authorization_id,
+                user_id,
+                device_id,
+                fingerprint,
+            ),
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.DIGEST_LENGTH,
+            ),
+            hashes.SHA256(),
+        )
+        return True
+    except (InvalidSignature, TypeError, ValueError):
+        return False
+
+
+def public_key_b64_from_private_key(private_key_pem: bytes) -> str:
+    """Return the canonical public-key representation for an existing client key."""
+    private_key = serialization.load_pem_private_key(private_key_pem, password=None)
+    if not isinstance(private_key, rsa.RSAPrivateKey):
+        raise ValueError("Only RSA private keys are supported.")
+    public_pem = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    canonical_b64, _ = validate_rsa_public_key(
+        base64.b64encode(public_pem).decode("ascii")
+    )
+    return canonical_b64
 
 
 # -----------------------------

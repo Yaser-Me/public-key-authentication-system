@@ -6,15 +6,17 @@ import requests
 from crypto_utils import (
     generate_rsa_keypair,
     sign_challenge,
+    sign_enrollment_proof,
+    public_key_b64_from_private_key,
     generate_aes_key,
     encrypt_private_key,
     decrypt_private_key,
+    validate_rsa_public_key,
 )
 
 BASE_URL = "http://127.0.0.1:5000"
 REQUEST_TIMEOUT_SECONDS = 5
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
-DEFINITE_REGISTRATION_REJECTION_CODES = {400, 409, 413}
 
 
 def _validate_identifier(value, field_name):
@@ -71,15 +73,85 @@ def _write_new_key_files(priv_file, aes_file, encrypted_private_key, aes_key):
         raise
 
 
-def register_device(user_id, device_id):
+def _validate_enrollment_authorization(authorization_id, authorization_secret):
+    if not isinstance(authorization_id, str) or not authorization_id:
+        raise ValueError("authorization_id is required.")
+    if not isinstance(authorization_secret, str) or not authorization_secret:
+        raise ValueError("authorization_secret is required.")
+
+
+def _build_enrollment_payload(
+    private_key_pem, user_id, device_id, authorization_id, authorization_secret
+):
+    public_key_b64 = public_key_b64_from_private_key(private_key_pem)
+    canonical_public_key_b64, fingerprint = validate_rsa_public_key(public_key_b64)
+    proof = sign_enrollment_proof(
+        private_key_pem,
+        authorization_id,
+        user_id,
+        device_id,
+        fingerprint,
+    )
+    return {
+        "user_id": user_id,
+        "device_id": device_id,
+        "authorization_id": authorization_id,
+        "authorization_secret": authorization_secret,
+        "public_key_b64": canonical_public_key_b64,
+        "enrollment_proof": base64.b64encode(proof).decode("ascii"),
+    }, fingerprint
+
+
+def _enrollment_warning(message):
+    return {
+        "error": message,
+        "warning": (
+            "Enrollment outcome is uncertain or denied; local key files were preserved. "
+            "Use trusted administrator inventory before manual cleanup."
+        ),
+    }
+
+
+def _submit_enrollment(payload, expected_fingerprint):
+    """Send a proof-bound enrollment request and validate only authoritative success."""
+    response = requests.post(
+        f"{BASE_URL}/authenticator/bind",
+        json=payload,
+        timeout=REQUEST_TIMEOUT_SECONDS,
+    )
+    try:
+        response_data = response.json()
+    except ValueError:
+        return _enrollment_warning(
+            f"Enrollment response could not be parsed (HTTP {response.status_code})."
+        )
+
+    if not response.ok:
+        return _enrollment_warning("Enrollment was not confirmed by the server.")
+
+    if not isinstance(response_data, dict):
+        return _enrollment_warning("Enrollment response could not be validated.")
+    if (
+        response_data.get("status") not in {"created", "reconciled"}
+        or response_data.get("user_id") != payload["user_id"]
+        or response_data.get("device_id") != payload["device_id"]
+        or response_data.get("public_key_fingerprint") != expected_fingerprint
+        or response_data.get("binding_state") not in {"active", "revoked"}
+    ):
+        return _enrollment_warning("Enrollment response could not be validated.")
+    return response_data
+
+
+def register_device(user_id, device_id, authorization_id, authorization_secret):
     """
-    Register a device:
+    Bind a new authenticator:
        generate RSA + AES keys
        encrypt private key locally
-       send the public key to the server
+       prove possession with an administrator-issued authorization
     """
     user_id = _validate_identifier(user_id, "user_id")
     device_id = _validate_identifier(device_id, "device_id")
+    _validate_enrollment_authorization(authorization_id, authorization_secret)
     priv_file, aes_file = _device_key_paths(user_id, device_id)
 
     if os.path.exists(priv_file) or os.path.exists(aes_file):
@@ -89,7 +161,7 @@ def register_device(user_id, device_id):
         )
 
     # RSA keys
-    priv_pem, pub_pem = generate_rsa_keypair()
+    priv_pem, _ = generate_rsa_keypair()
 
     # AES key for local storage protection
     aes_key = generate_aes_key()
@@ -101,39 +173,44 @@ def register_device(user_id, device_id):
     # no server-side device is created. Exclusive modes prevent overwriting.
     _write_new_key_files(priv_file, aes_file, enc_priv_b64, aes_key)
 
-    # Send registration info to the backend. If the request raises or times out,
-    # preserve both files because the server may have accepted the registration
-    # before the client lost the response.
-    resp = requests.post(f"{BASE_URL}/register_device", json={
-        "user_id": user_id,
-        "device_id": device_id,
-        "public_key_b64": base64.b64encode(pub_pem).decode(),
-    }, timeout=REQUEST_TIMEOUT_SECONDS)
+    try:
+        payload, fingerprint = _build_enrollment_payload(
+            priv_pem,
+            user_id,
+            device_id,
+            authorization_id,
+            authorization_secret,
+        )
+    except Exception:
+        # No request was sent, so only the newly created local files are safe to remove.
+        _remove_key_files((priv_file, aes_file))
+        raise
 
-    if not resp.ok:
-        try:
-            response_data = resp.json()
-        except ValueError:
-            response_data = {
-                "error": f"Registration failed with HTTP {resp.status_code}."
-            }
+    # Once requests.post starts, every outcome keeps the complete key pair. A
+    # committed binding can lose its response and be reconciled by exact retry.
+    response_data = _submit_enrollment(payload, fingerprint)
 
-        if resp.status_code in DEFINITE_REGISTRATION_REJECTION_CODES:
-            # These route outcomes occur before registration or after its
-            # transaction was rolled back. Remove only files created here.
-            _remove_key_files((priv_file, aes_file))
-        elif isinstance(response_data, dict):
-            response_data["warning"] = (
-                "Registration outcome is uncertain; local key files were preserved."
-            )
-        return response_data
-
-    response_data = resp.json()
-
-    print(f"[+] encrypted private key -> {priv_file}")
-    print(f"[+] AES key -> {aes_file}")
+    if response_data.get("status") in {"created", "reconciled"}:
+        print(f"[+] encrypted private key -> {priv_file}")
+        print(f"[+] AES key -> {aes_file}")
 
     return response_data
+
+
+def retry_device_enrollment(user_id, device_id, authorization_id, authorization_secret):
+    """Retry enrollment with the existing key without replacing local material."""
+    user_id = _validate_identifier(user_id, "user_id")
+    device_id = _validate_identifier(device_id, "device_id")
+    _validate_enrollment_authorization(authorization_id, authorization_secret)
+    private_key_pem = _load_private_key(user_id, device_id)
+    payload, fingerprint = _build_enrollment_payload(
+        private_key_pem,
+        user_id,
+        device_id,
+        authorization_id,
+        authorization_secret,
+    )
+    return _submit_enrollment(payload, fingerprint)
 
 
 def _load_private_key(user_id: str, device_id: str) -> bytes:
