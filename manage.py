@@ -33,7 +33,9 @@ def build_parser():
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("init", help="Initialize local state without replacing it.")
     subparsers.add_parser("status", help="Show local state readiness and counts.")
-    subparsers.add_parser("migrate", help="Explicitly migrate supported v1 state to v2.")
+    subparsers.add_parser(
+        "migrate", help="Explicitly migrate supported v1 or v2 state to v3."
+    )
 
     identity_add = subparsers.add_parser(
         "identity-add", help="Create a logical identity through trusted local administration."
@@ -59,7 +61,7 @@ def build_parser():
     inventory.add_argument("--fingerprint")
 
     revoke = subparsers.add_parser(
-        "revoke", help="Terminally revoke an authenticator and clear its challenge."
+        "revoke", help="Terminally revoke an authenticator and invalidate its challenges."
     )
     revoke.add_argument("user_id")
     revoke.add_argument("device_id")

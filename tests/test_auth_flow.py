@@ -7,16 +7,20 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import db_utils
 import server
 from crypto_utils import (
+    AUTHENTICATION_PROTOCOL,
     generate_rsa_keypair,
     sign_challenge,
+    sign_authentication_proof,
     sign_enrollment_proof,
     validate_rsa_public_key,
 )
 from db_utils import (
     create_identity,
     get_database_status,
+    get_authentication_challenge,
     get_device,
     initialize_database,
     issue_enrollment_authorization,
@@ -93,20 +97,27 @@ class AuthenticationFlowTests(unittest.TestCase):
         return self.client.post(
             "/login/request_challenge",
             json={
+                "protocol": AUTHENTICATION_PROTOCOL,
                 "user_id": user_id or self.user_id,
                 "device_id": device_id or self.device_id,
             },
         )
 
-    def _signed_login_payload(self, private_key, challenge_b64):
-        challenge = base64.b64decode(challenge_b64, validate=True)
+    def _signed_login_payload(self, private_key, challenge):
+        nonce = base64.b64decode(challenge["nonce"], validate=True)
         return {
-            "user_id": self.user_id,
-            "device_id": self.device_id,
-            "challenge": challenge_b64,
-            "signature": base64.b64encode(sign_challenge(private_key, challenge)).decode(
-                "ascii"
-            ),
+            "protocol": AUTHENTICATION_PROTOCOL,
+            "challenge_id": challenge["challenge_id"],
+            "signature": base64.b64encode(
+                sign_authentication_proof(
+                    private_key,
+                    challenge["challenge_id"],
+                    nonce,
+                    challenge["user_id"],
+                    challenge["device_id"],
+                    challenge["public_key_fingerprint"],
+                )
+            ).decode("ascii"),
         }
 
     def _authorization_row(self, authorization_id):
@@ -320,39 +331,65 @@ class AuthenticationFlowTests(unittest.TestCase):
         self.assertTrue(set(outcomes).issubset({"created", "reconciled"}))
         self.assertEqual(get_database_status(self._database_path)["devices"], 1)
 
-    def test_challenge_issuance_and_valid_authentication_are_preserved(self):
+    def test_v2_challenge_issuance_and_valid_authentication(self):
         private_key, _, _, _, _, _ = self._bind()
         challenge_response = self._request_challenge()
         self.assertEqual(challenge_response.status_code, 200)
-        challenge_b64 = challenge_response.get_json()["challenge"]
-        self.assertEqual(len(base64.b64decode(challenge_b64, validate=True)), 32)
+        challenge = challenge_response.get_json()
+        self.assertEqual(challenge["protocol"], AUTHENTICATION_PROTOCOL)
+        self.assertEqual(len(challenge["challenge_id"]), 43)
+        self.assertEqual(len(base64.b64decode(challenge["nonce"], validate=True)), 32)
 
         response = self.client.post(
-            "/login/verify", json=self._signed_login_payload(private_key, challenge_b64)
+            "/login/verify", json=self._signed_login_payload(private_key, challenge)
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["status"], "success")
-        self.assertIsNone(get_device(self._database_path, self.user_id, self.device_id)["challenge"])
+        self.assertIsNotNone(
+            get_authentication_challenge(self._database_path, challenge["challenge_id"])[
+                "consumed_at"
+            ]
+        )
 
     def test_invalid_signature_and_replay_are_rejected_and_challenge_is_consumed_once(self):
         private_key, _, _, _, _, _ = self._bind()
-        challenge_b64 = self._request_challenge().get_json()["challenge"]
+        challenge = self._request_challenge().get_json()
         wrong_private_key, _ = generate_rsa_keypair()
-        invalid_payload = self._signed_login_payload(wrong_private_key, challenge_b64)
+        invalid_payload = self._signed_login_payload(wrong_private_key, challenge)
         invalid = self.client.post("/login/verify", json=invalid_payload)
         self.assertEqual(invalid.status_code, 403)
-        self.assertEqual(get_device(self._database_path, self.user_id, self.device_id)["challenge"], challenge_b64)
+        self.assertIsNone(
+            get_authentication_challenge(self._database_path, challenge["challenge_id"])[
+                "consumed_at"
+            ]
+        )
 
-        valid_payload = self._signed_login_payload(private_key, challenge_b64)
+        valid_payload = self._signed_login_payload(private_key, challenge)
         first = self.client.post("/login/verify", json=valid_payload)
         replay = self.client.post("/login/verify", json=valid_payload)
         self.assertEqual(first.status_code, 200)
         self.assertEqual(replay.status_code, 403)
 
-    def test_concurrent_verification_still_allows_one_success(self):
+    def test_multiple_independent_challenges_remain_usable_once_each(self):
         private_key, _, _, _, _, _ = self._bind()
-        challenge_b64 = self._request_challenge().get_json()["challenge"]
-        payload = self._signed_login_payload(private_key, challenge_b64)
+        first_challenge = self._request_challenge().get_json()
+        second_challenge = self._request_challenge().get_json()
+
+        first = self.client.post(
+            "/login/verify", json=self._signed_login_payload(private_key, first_challenge)
+        )
+        second = self.client.post(
+            "/login/verify", json=self._signed_login_payload(private_key, second_challenge)
+        )
+
+        self.assertNotEqual(first_challenge["challenge_id"], second_challenge["challenge_id"])
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+
+    def test_concurrent_verification_allows_one_success(self):
+        private_key, _, _, _, _, _ = self._bind()
+        challenge = self._request_challenge().get_json()
+        payload = self._signed_login_payload(private_key, challenge)
 
         def verify_once():
             with self.server.app.test_client() as test_client:
@@ -362,12 +399,16 @@ class AuthenticationFlowTests(unittest.TestCase):
             results = list(executor.map(lambda _: verify_once(), range(2)))
 
         self.assertEqual(sorted(results), [200, 403])
-        self.assertIsNone(get_device(self._database_path, self.user_id, self.device_id)["challenge"])
+        self.assertIsNotNone(
+            get_authentication_challenge(self._database_path, challenge["challenge_id"])[
+                "consumed_at"
+            ]
+        )
 
     def test_trusted_revocation_invalidates_challenge_and_blocks_new_authentication(self):
         private_key, _, _, _, _, _ = self._bind()
-        challenge_b64 = self._request_challenge().get_json()["challenge"]
-        payload = self._signed_login_payload(private_key, challenge_b64)
+        challenge = self._request_challenge().get_json()
+        payload = self._signed_login_payload(private_key, challenge)
 
         self.assertEqual(
             revoke_authenticator(
@@ -383,6 +424,9 @@ class AuthenticationFlowTests(unittest.TestCase):
 
         self.assertTrue(get_device(self._database_path, self.user_id, self.device_id)["revoked"])
         self.assertIsNone(get_device(self._database_path, self.user_id, self.device_id)["challenge"])
+        self.assertIsNone(
+            get_authentication_challenge(self._database_path, challenge["challenge_id"])
+        )
         self.assertEqual(challenge_response.status_code, 403)
         self.assertEqual(verify_response.status_code, 403)
 
@@ -391,7 +435,7 @@ class AuthenticationFlowTests(unittest.TestCase):
         issuance_reached = threading.Event()
         allow_issuance = threading.Event()
         result = {}
-        real_issue = self.server.issue_device_challenge
+        real_issue = self.server.issue_authentication_challenge
 
         def delayed_issue(*args):
             issuance_reached.set()
@@ -402,10 +446,14 @@ class AuthenticationFlowTests(unittest.TestCase):
             with self.server.app.test_client() as test_client:
                 result["response"] = test_client.post(
                     "/login/request_challenge",
-                    json={"user_id": self.user_id, "device_id": self.device_id},
+                    json={
+                        "protocol": AUTHENTICATION_PROTOCOL,
+                        "user_id": self.user_id,
+                        "device_id": self.device_id,
+                    },
                 )
 
-        with patch.object(self.server, "issue_device_challenge", side_effect=delayed_issue):
+        with patch.object(self.server, "issue_authentication_challenge", side_effect=delayed_issue):
             thread = threading.Thread(target=request_challenge)
             thread.start()
             self.assertTrue(issuance_reached.wait(timeout=2))
@@ -426,12 +474,12 @@ class AuthenticationFlowTests(unittest.TestCase):
 
     def test_revocation_wins_before_blocked_verification_consumption_transition(self):
         private_key, _, _, _, _, _ = self._bind()
-        challenge_b64 = self._request_challenge().get_json()["challenge"]
-        payload = self._signed_login_payload(private_key, challenge_b64)
+        challenge = self._request_challenge().get_json()
+        payload = self._signed_login_payload(private_key, challenge)
         consumption_reached = threading.Event()
         allow_consumption = threading.Event()
         result = {}
-        real_consume = self.server.consume_device_challenge
+        real_consume = self.server.consume_authentication_challenge
 
         def delayed_consume(*args):
             consumption_reached.set()
@@ -442,7 +490,7 @@ class AuthenticationFlowTests(unittest.TestCase):
             with self.server.app.test_client() as test_client:
                 result["response"] = test_client.post("/login/verify", json=payload)
 
-        with patch.object(self.server, "consume_device_challenge", side_effect=delayed_consume):
+        with patch.object(self.server, "consume_authentication_challenge", side_effect=delayed_consume):
             thread = threading.Thread(target=verify)
             thread.start()
             self.assertTrue(consumption_reached.wait(timeout=2))
@@ -460,14 +508,17 @@ class AuthenticationFlowTests(unittest.TestCase):
         device = get_device(self._database_path, self.user_id, self.device_id)
         self.assertTrue(device["revoked"])
         self.assertIsNone(device["challenge"])
+        self.assertIsNone(
+            get_authentication_challenge(self._database_path, challenge["challenge_id"])
+        )
 
     def test_verification_committed_before_revocation_remains_an_earlier_success(self):
         private_key, _, _, _, _, _ = self._bind()
-        challenge_b64 = self._request_challenge().get_json()["challenge"]
+        challenge = self._request_challenge().get_json()
 
         verification = self.client.post(
             "/login/verify",
-            json=self._signed_login_payload(private_key, challenge_b64),
+            json=self._signed_login_payload(private_key, challenge),
         )
         revoked = revoke_authenticator(
             self._database_path,
@@ -481,6 +532,191 @@ class AuthenticationFlowTests(unittest.TestCase):
         device = get_device(self._database_path, self.user_id, self.device_id)
         self.assertTrue(device["revoked"])
         self.assertIsNone(device["challenge"])
+        self.assertIsNone(
+            get_authentication_challenge(self._database_path, challenge["challenge_id"])
+        )
+
+    def test_legacy_login_requests_cannot_downgrade_authentication(self):
+        private_key, _, _, _, _, _ = self._bind()
+        legacy_request = self.client.post(
+            "/login/request_challenge",
+            json={"user_id": self.user_id, "device_id": self.device_id},
+        )
+        legacy_verify = self.client.post(
+            "/login/verify",
+            json={
+                "user_id": self.user_id,
+                "device_id": self.device_id,
+                "challenge": base64.b64encode(b"x" * 32).decode("ascii"),
+                "signature": base64.b64encode(b"legacy").decode("ascii"),
+            },
+        )
+
+        self.assertEqual(legacy_request.status_code, 400)
+        self.assertEqual(legacy_verify.status_code, 400)
+        self.assertEqual(get_database_status(self._database_path)["devices"], 1)
+
+    def test_context_tampering_and_legacy_signature_preserve_the_challenge(self):
+        private_key, _, _, _, fingerprint, _ = self._bind()
+        challenge = self._request_challenge().get_json()
+        nonce = base64.b64decode(challenge["nonce"], validate=True)
+        wrong_context_signature = sign_authentication_proof(
+            private_key,
+            challenge["challenge_id"],
+            nonce,
+            "student2",
+            self.device_id,
+            fingerprint,
+        )
+        tampered = self.client.post(
+            "/login/verify",
+            json={
+                "protocol": AUTHENTICATION_PROTOCOL,
+                "challenge_id": challenge["challenge_id"],
+                "signature": base64.b64encode(wrong_context_signature).decode("ascii"),
+            },
+        )
+        legacy_signature = self.client.post(
+            "/login/verify",
+            json={
+                "protocol": AUTHENTICATION_PROTOCOL,
+                "challenge_id": challenge["challenge_id"],
+                "signature": base64.b64encode(
+                    sign_challenge(private_key, b"legacy raw challenge")
+                ).decode("ascii"),
+            },
+        )
+
+        self.assertEqual(tampered.status_code, 403)
+        self.assertEqual(legacy_signature.status_code, 403)
+        self.assertIsNone(
+            get_authentication_challenge(self._database_path, challenge["challenge_id"])[
+                "consumed_at"
+            ]
+        )
+
+    def test_expired_v2_challenge_is_denied_without_consumption(self):
+        private_key, _, _, _, _, _ = self._bind()
+        with patch.object(db_utils, "utc_now", return_value="2026-01-01T00:00:00+00:00"):
+            challenge = self._request_challenge().get_json()
+        with patch.object(db_utils, "utc_now", return_value="2026-01-01T00:05:00+00:00"):
+            response = self.client.post(
+                "/login/verify", json=self._signed_login_payload(private_key, challenge)
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIsNone(
+            get_authentication_challenge(self._database_path, challenge["challenge_id"])[
+                "consumed_at"
+            ]
+        )
+
+    def test_malformed_v2_login_input_fails_without_state_change(self):
+        private_key, _, _, _, _, _ = self._bind()
+        challenge = self._request_challenge().get_json()
+        valid_payload = self._signed_login_payload(private_key, challenge)
+        requests = (
+            (
+                "/login/request_challenge",
+                {"protocol": AUTHENTICATION_PROTOCOL, "user_id": self.user_id, "device_id": self.device_id, "extra": "x"},
+            ),
+            (
+                "/login/verify",
+                {"protocol": "PKAS-AUTH-V1", "challenge_id": challenge["challenge_id"], "signature": valid_payload["signature"]},
+            ),
+            (
+                "/login/verify",
+                {"protocol": AUTHENTICATION_PROTOCOL, "challenge_id": "!" * 43, "signature": valid_payload["signature"]},
+            ),
+            (
+                "/login/verify",
+                {"protocol": AUTHENTICATION_PROTOCOL, "challenge_id": challenge["challenge_id"], "signature": "!!!"},
+            ),
+        )
+        for endpoint, payload in requests:
+            with self.subTest(endpoint=endpoint, payload=payload):
+                self.assertEqual(self.client.post(endpoint, json=payload).status_code, 400)
+        self.assertIsNone(
+            get_authentication_challenge(self._database_path, challenge["challenge_id"])[
+                "consumed_at"
+            ]
+        )
+
+    def test_challenge_consumption_database_failure_is_state_unavailable(self):
+        private_key, _, _, _, _, _ = self._bind()
+        challenge = self._request_challenge().get_json()
+        connection = sqlite3.connect(self._database_path)
+        try:
+            connection.execute(
+                """
+                CREATE TRIGGER force_challenge_consumption_failure
+                BEFORE UPDATE OF consumed_at ON authentication_challenges
+                WHEN NEW.consumed_at IS NOT NULL
+                BEGIN
+                    SELECT RAISE(ABORT, 'forced challenge consumption failure');
+                END
+                """
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        response = self.client.post(
+            "/login/verify", json=self._signed_login_payload(private_key, challenge)
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.get_json()["code"], "state_unavailable")
+        self.assertIsNone(
+            get_authentication_challenge(self._database_path, challenge["challenge_id"])[
+                "consumed_at"
+            ]
+        )
+
+    def test_inconsistent_challenge_binding_state_fails_closed(self):
+        private_key, _, _, _, _, _ = self._bind()
+        challenge = self._request_challenge().get_json()
+        connection = sqlite3.connect(self._database_path)
+        try:
+            connection.execute(
+                "UPDATE authentication_challenges SET public_key_fingerprint = ? "
+                "WHERE challenge_id = ?",
+                ("SHA256:inconsistent", challenge["challenge_id"]),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        response = self.client.post(
+            "/login/verify", json=self._signed_login_payload(private_key, challenge)
+        )
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.get_json()["code"], "state_unavailable")
+
+    def test_corrupted_stored_key_or_fingerprint_is_state_unavailable(self):
+        private_key, _, _, _, _, _ = self._bind()
+        challenge = self._request_challenge().get_json()
+        connection = sqlite3.connect(self._database_path)
+        try:
+            connection.execute(
+                "UPDATE devices SET public_key_b64 = ? WHERE user_id = ? AND device_id = ?",
+                ("not-a-public-key", self.user_id, self.device_id),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        response = self.client.post(
+            "/login/verify", json=self._signed_login_payload(private_key, challenge)
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.get_json()["code"], "state_unavailable")
+        self.assertIsNone(
+            get_authentication_challenge(self._database_path, challenge["challenge_id"])[
+                "consumed_at"
+            ]
+        )
 
     def test_oversized_request_and_missing_state_fail_safely(self):
         oversized = self.client.post(

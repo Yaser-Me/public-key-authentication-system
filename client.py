@@ -28,10 +28,11 @@ from credential_store import (
     publish_credential,
 )
 from crypto_utils import (
+    AUTHENTICATION_PROTOCOL,
     decrypt_private_key,
     generate_rsa_keypair,
     public_key_b64_from_private_key,
-    sign_challenge,
+    sign_authentication_proof,
     sign_enrollment_proof,
     validate_rsa_public_key,
 )
@@ -39,6 +40,7 @@ from db_utils import (
     DatabaseError,
     list_authenticator_inventory,
     run_if_binding_active,
+    validate_challenge_id,
     validate_identifier,
 )
 
@@ -240,15 +242,51 @@ def retry_device_enrollment(
     return _submit_enrollment(payload, fingerprint)
 
 
+def _parse_authentication_challenge(data, user_id, device_id, fingerprint):
+    required_fields = {
+        "protocol",
+        "challenge_id",
+        "nonce",
+        "user_id",
+        "device_id",
+        "public_key_fingerprint",
+        "expires_at",
+    }
+    if not isinstance(data, dict) or set(data) != required_fields:
+        return None
+    if data["protocol"] != AUTHENTICATION_PROTOCOL:
+        return None
+    if (
+        data["user_id"] != user_id
+        or data["device_id"] != device_id
+        or data["public_key_fingerprint"] != fingerprint
+    ):
+        return None
+    if not isinstance(data["expires_at"], str) or not data["expires_at"]:
+        return None
+    try:
+        challenge_id = validate_challenge_id(data["challenge_id"])
+        nonce = base64.b64decode(data["nonce"], validate=True)
+    except (TypeError, ValueError, binascii.Error):
+        return None
+    if len(nonce) != 32:
+        return None
+    return challenge_id, nonce
+
+
 def login(user_id, device_id, passphrase, credential_directory=None):
-    """Unlock locally before requesting the unchanged legacy login challenge."""
-    private_key_pem, _, _ = _load_current_private_key(
+    """Unlock locally before requesting and signing one v2 challenge."""
+    private_key_pem, _, fingerprint = _load_current_private_key(
         user_id, device_id, passphrase, credential_directory
     )
     try:
         response = requests.post(
             f"{BASE_URL}/login/request_challenge",
-            json={"user_id": user_id, "device_id": device_id},
+            json={
+                "protocol": AUTHENTICATION_PROTOCOL,
+                "user_id": user_id,
+                "device_id": device_id,
+            },
             timeout=REQUEST_TIMEOUT_SECONDS,
         )
     except requests.RequestException:
@@ -257,20 +295,23 @@ def login(user_id, device_id, passphrase, credential_directory=None):
         data = response.json()
     except ValueError:
         return {"status": "challenge_unavailable", "error": "Challenge response could not be parsed."}
-    if not isinstance(data, dict) or "challenge" not in data:
-        return data if isinstance(data, dict) else {"status": "challenge_unavailable", "error": "Challenge response is invalid."}
-    try:
-        challenge = base64.b64decode(data["challenge"], validate=True)
-    except (TypeError, binascii.Error):
-        return {"status": "challenge_unavailable", "error": "Challenge response is invalid."}
-    signature = sign_challenge(private_key_pem, challenge)
+    challenge = _parse_authentication_challenge(data, user_id, device_id, fingerprint)
+    if challenge is None:
+        return (
+            data
+            if isinstance(data, dict) and data.get("code") == "authentication_denied"
+            else {"status": "challenge_unavailable", "error": "Challenge response is invalid."}
+        )
+    challenge_id, nonce = challenge
+    signature = sign_authentication_proof(
+        private_key_pem, challenge_id, nonce, user_id, device_id, fingerprint
+    )
     try:
         response = requests.post(
             f"{BASE_URL}/login/verify",
             json={
-                "user_id": user_id,
-                "device_id": device_id,
-                "challenge": data["challenge"],
+                "protocol": AUTHENTICATION_PROTOCOL,
+                "challenge_id": challenge_id,
                 "signature": base64.b64encode(signature).decode("ascii"),
             },
             timeout=REQUEST_TIMEOUT_SECONDS,

@@ -5,6 +5,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519, padding, rsa
 
 from crypto_utils import (
+    _authentication_proof_message,
     _enrollment_proof_message,
     decrypt_private_key,
     encrypt_private_key,
@@ -12,9 +13,11 @@ from crypto_utils import (
     generate_rsa_keypair,
     public_key_b64_from_private_key,
     sign_challenge,
+    sign_authentication_proof,
     sign_enrollment_proof,
     validate_rsa_public_key,
     verify_enrollment_proof,
+    verify_authentication_proof,
     verify_signature,
 )
 
@@ -116,6 +119,87 @@ class CryptoTests(unittest.TestCase):
         )
         self.assertFalse(
             verify_enrollment_proof(public_key_b64, legacy_signature, *context)
+        )
+
+    def test_authentication_proof_v2_is_independent_and_binds_context(self):
+        private_key_pem, public_key_pem = generate_rsa_keypair()
+        context = (
+            "A" * 43,
+            b"n" * 32,
+            "student1",
+            "laptop1",
+            "SHA256:fingerprint",
+        )
+        expected_message = (
+            b"PKAS-AUTHENTICATION-PROOF-V2"
+            + b"\x00\x00\x00+"
+            + b"A" * 43
+            + b"\x00\x00\x00 "
+            + b"n" * 32
+            + b"\x00\x00\x00\x08student1"
+            + b"\x00\x00\x00\x07laptop1"
+            + b"\x00\x00\x00\x12SHA256:fingerprint"
+        )
+        self.assertEqual(_authentication_proof_message(*context), expected_message)
+
+        signature = sign_authentication_proof(private_key_pem, *context)
+        public_key = serialization.load_pem_public_key(public_key_pem)
+        public_key.verify(
+            signature,
+            expected_message,
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.DIGEST_LENGTH,
+            ),
+            hashes.SHA256(),
+        )
+        public_key_b64 = base64.b64encode(public_key_pem).decode("ascii")
+        self.assertTrue(verify_authentication_proof(public_key_b64, signature, *context))
+        second_signature = sign_authentication_proof(private_key_pem, *context)
+        self.assertNotEqual(signature, second_signature)
+        self.assertTrue(
+            verify_authentication_proof(public_key_b64, second_signature, *context)
+        )
+
+        for changed_context in (
+            ("B" * 43, *context[1:]),
+            (context[0], b"o" * 32, *context[2:]),
+            (context[0], context[1], "student2", *context[3:]),
+            (context[0], context[1], context[2], "tablet1", context[4]),
+            (*context[:4], "SHA256:other"),
+        ):
+            with self.subTest(changed_context=changed_context):
+                self.assertFalse(
+                    verify_authentication_proof(
+                        public_key_b64, signature, *changed_context
+                    )
+                )
+
+    def test_authentication_and_enrollment_proofs_are_not_interchangeable(self):
+        private_key, public_key = generate_rsa_keypair()
+        public_key_b64 = base64.b64encode(public_key).decode("ascii")
+        authentication_context = (
+            "A" * 43,
+            b"n" * 32,
+            "student1",
+            "laptop1",
+            "SHA256:fingerprint",
+        )
+        enrollment_context = ("grant-123", "student1", "laptop1", "SHA256:fingerprint")
+        authentication_signature = sign_authentication_proof(
+            private_key, *authentication_context
+        )
+        enrollment_signature = sign_enrollment_proof(private_key, *enrollment_context)
+
+        self.assertFalse(
+            verify_authentication_proof(
+                public_key_b64, enrollment_signature, *authentication_context
+            )
+        )
+        self.assertFalse(
+            verify_enrollment_proof(
+                public_key_b64, authentication_signature, *enrollment_context
+            )
         )
 
     def test_private_key_encryption_round_trip(self):

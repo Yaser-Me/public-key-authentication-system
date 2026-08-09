@@ -1,23 +1,23 @@
 import base64
 import binascii
-import os
-
 from flask import Flask, jsonify, request
 
 from crypto_utils import (
+    AUTHENTICATION_PROTOCOL,
     validate_rsa_public_key,
+    verify_authentication_proof,
     verify_enrollment_proof,
-    verify_signature,
 )
 from db_utils import (
     DatabaseError,
     EnrollmentDeniedError,
     bind_authenticator,
-    consume_device_challenge,
+    consume_authentication_challenge,
+    get_authentication_challenge,
     get_database_status,
     get_default_database_path,
-    get_device,
-    issue_device_challenge,
+    issue_authentication_challenge,
+    validate_challenge_id,
     validate_identifier as validate_state_identifier,
 )
 
@@ -30,8 +30,6 @@ MAX_PUBLIC_KEY_B64_LENGTH = 8192
 MAX_SIGNATURE_B64_LENGTH = 8192
 MAX_AUTHORIZATION_ID_LENGTH = 128
 MAX_AUTHORIZATION_SECRET_LENGTH = 512
-
-
 class RequestValidationError(ValueError):
     """A request field is missing or malformed."""
 
@@ -48,7 +46,7 @@ def _error(message, code, status_code):
     return jsonify({"error": message, "code": code}), status_code
 
 
-def _request_json(required_fields):
+def _request_json(required_fields, exact_fields=False):
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
         raise RequestValidationError(
@@ -62,6 +60,13 @@ def _request_json(required_fields):
             f"Missing required field: {missing_fields[0]}",
             "missing_field",
         )
+    if exact_fields:
+        unknown_fields = set(data) - set(required_fields)
+        if unknown_fields:
+            raise RequestValidationError(
+                "The request contains an unsupported field.",
+                "unknown_field",
+            )
     return data
 
 
@@ -105,6 +110,24 @@ def _validate_base64(value, field_name, max_encoded_length, expected_length=None
             "invalid_length",
         )
     return decoded
+
+
+def _validate_authentication_protocol(value):
+    if value != AUTHENTICATION_PROTOCOL:
+        raise RequestValidationError(
+            "The authentication protocol is not supported.",
+            "unsupported_authentication_protocol",
+        )
+    return value
+
+
+def _validate_challenge_identifier(value):
+    try:
+        return validate_challenge_id(value)
+    except ValueError as exc:
+        raise RequestValidationError(
+            "challenge_id is invalid.", "invalid_challenge_id"
+        ) from exc
 
 
 @app.errorhandler(DatabaseError)
@@ -227,70 +250,86 @@ def legacy_register_device_route():
 @app.route("/login/request_challenge", methods=["POST"])
 def request_challenge():
     try:
-        data = _request_json(("user_id", "device_id"))
+        data = _request_json(("protocol", "user_id", "device_id"), exact_fields=True)
+        _validate_authentication_protocol(data["protocol"])
         user_id = _validate_identifier(data["user_id"], "user_id")
         device_id = _validate_identifier(data["device_id"], "device_id")
     except RequestValidationError as exc:
         return _error(str(exc), exc.code, 400)
 
-    challenge = os.urandom(32)
-    challenge_b64 = base64.b64encode(challenge).decode("ascii")
-
-    if not issue_device_challenge(
+    challenge = issue_authentication_challenge(
         _database_path(),
         user_id,
         device_id,
-        challenge_b64,
-    ):
+    )
+    if challenge is None:
         return _error("Unknown or revoked device.", "authentication_denied", 403)
 
-    return jsonify({"challenge": challenge_b64})
+    return jsonify(
+        {
+            "protocol": AUTHENTICATION_PROTOCOL,
+            "challenge_id": challenge["challenge_id"],
+            "nonce": challenge["nonce_b64"],
+            "user_id": challenge["user_id"],
+            "device_id": challenge["device_id"],
+            "public_key_fingerprint": challenge["public_key_fingerprint"],
+            "expires_at": challenge["expires_at"],
+        }
+    )
 
 
 @app.route("/login/verify", methods=["POST"])
 def verify_login():
     try:
-        data = _request_json(("user_id", "device_id", "challenge", "signature"))
-        user_id = _validate_identifier(data["user_id"], "user_id")
-        device_id = _validate_identifier(data["device_id"], "device_id")
-        challenge_b64 = data["challenge"]
-        signature_b64 = data["signature"]
-        challenge = _validate_base64(
-            challenge_b64,
-            "challenge",
-            max_encoded_length=128,
-            expected_length=32,
+        data = _request_json(
+            ("protocol", "challenge_id", "signature"), exact_fields=True
         )
+        _validate_authentication_protocol(data["protocol"])
+        challenge_id = _validate_challenge_identifier(data["challenge_id"])
         signature = _validate_base64(
-            signature_b64,
+            data["signature"],
             "signature",
             max_encoded_length=MAX_SIGNATURE_B64_LENGTH,
         )
     except RequestValidationError as exc:
         return _error(str(exc), exc.code, 400)
 
-    device = get_device(_database_path(), user_id, device_id)
-    if not device:
-        return _error("Unknown device.", "authentication_denied", 403)
-    if device["revoked"]:
-        return _error("Device revoked.", "authentication_denied", 403)
+    challenge = get_authentication_challenge(_database_path(), challenge_id)
+    if challenge is None:
+        return _error("Authentication denied.", "authentication_denied", 403)
+    try:
+        nonce = _validate_base64(
+            challenge["nonce_b64"], "challenge nonce", max_encoded_length=128, expected_length=32
+        )
+    except RequestValidationError:
+        # A malformed stored nonce is a trusted-state failure, not an ordinary denial.
+        return _error("Local state is unavailable.", "state_unavailable", 503)
 
-    stored_challenge_b64 = device["challenge"]
-    if not stored_challenge_b64:
-        return _error("No challenge found.", "authentication_denied", 403)
-    if stored_challenge_b64 != challenge_b64:
-        return _error("Challenge mismatch.", "authentication_denied", 403)
-
-    if not verify_signature(device["public_key_b64"], signature, challenge):
-        return _error("Invalid signature.", "authentication_denied", 403)
-
-    if not consume_device_challenge(
-        _database_path(),
-        user_id,
-        device_id,
-        challenge_b64,
+    try:
+        canonical_public_key_b64, fingerprint = validate_rsa_public_key(
+            challenge["public_key_b64"]
+        )
+    except ValueError:
+        return _error("Local state is unavailable.", "state_unavailable", 503)
+    if (
+        canonical_public_key_b64 != challenge["public_key_b64"]
+        or fingerprint != challenge["public_key_fingerprint"]
     ):
-        return _error("Challenge no longer valid.", "authentication_denied", 403)
+        return _error("Local state is unavailable.", "state_unavailable", 503)
+
+    if not verify_authentication_proof(
+        canonical_public_key_b64,
+        signature,
+        challenge["challenge_id"],
+        nonce,
+        challenge["user_id"],
+        challenge["device_id"],
+        challenge["public_key_fingerprint"],
+    ):
+        return _error("Authentication denied.", "authentication_denied", 403)
+
+    if not consume_authentication_challenge(_database_path(), challenge_id):
+        return _error("Authentication denied.", "authentication_denied", 403)
 
     return jsonify({"status": "success", "message": "Login OK"})
 

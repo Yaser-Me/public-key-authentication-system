@@ -1,5 +1,10 @@
 # Administrator-Controlled Authenticator Binding and Revocation
 
+> Historical Milestone 1 scope note: this document records the v2 lifecycle
+> boundary as delivered. Milestone 3 later replaced the legacy login protocol
+> and its single stored challenge with versioned, expiring authentication
+> challenges; its original lifecycle assertions remain historical evidence.
+
 Implementation date: 2026-08-09
 
 ## Objective

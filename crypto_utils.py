@@ -12,6 +12,8 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 # RSA key generation & signatures
 
 ENROLLMENT_PROOF_DOMAIN = b"PKAS-ENROLLMENT-PROOF-V1"
+AUTHENTICATION_PROOF_DOMAIN = b"PKAS-AUTHENTICATION-PROOF-V2"
+AUTHENTICATION_PROTOCOL = "PKAS-AUTH-V2"
 
 
 def _enrollment_proof_message(authorization_id, user_id, device_id, fingerprint):
@@ -24,6 +26,28 @@ def _enrollment_proof_message(authorization_id, user_id, device_id, fingerprint)
         encoded = value.encode("utf-8")
         encoded_values.append(len(encoded).to_bytes(4, "big") + encoded)
     return ENROLLMENT_PROOF_DOMAIN + b"".join(encoded_values)
+
+
+def _authentication_proof_message(
+    challenge_id, nonce, user_id, device_id, fingerprint
+):
+    """Encode the v2 authentication context before signing it."""
+    text_values = (challenge_id, user_id, device_id, fingerprint)
+    encoded_values = []
+    for value in text_values:
+        if not isinstance(value, str):
+            raise ValueError("Authentication proof text fields must be text.")
+        encoded = value.encode("utf-8")
+        encoded_values.append(len(encoded).to_bytes(4, "big") + encoded)
+    if not isinstance(nonce, bytes):
+        raise ValueError("Authentication proof nonce must be bytes.")
+    return (
+        AUTHENTICATION_PROOF_DOMAIN
+        + encoded_values[0]
+        + len(nonce).to_bytes(4, "big")
+        + nonce
+        + b"".join(encoded_values[1:])
+    )
 
 
 def generate_rsa_keypair():
@@ -157,6 +181,47 @@ def verify_enrollment_proof(
                 user_id,
                 device_id,
                 fingerprint,
+            ),
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.DIGEST_LENGTH,
+            ),
+            hashes.SHA256(),
+        )
+        return True
+    except (InvalidSignature, TypeError, ValueError):
+        return False
+
+
+def sign_authentication_proof(
+    private_key_pem: bytes, challenge_id, nonce, user_id, device_id, fingerprint
+) -> bytes:
+    """Sign the fixed v2 authentication context with RSA-PSS and SHA-256."""
+    private_key = serialization.load_pem_private_key(private_key_pem, password=None)
+    if not isinstance(private_key, rsa.RSAPrivateKey):
+        raise ValueError("Only RSA private keys can create authentication proofs.")
+    return private_key.sign(
+        _authentication_proof_message(
+            challenge_id, nonce, user_id, device_id, fingerprint
+        ),
+        padding.PSS(
+            mgf=padding.MGF1(hashes.SHA256()),
+            salt_length=padding.PSS.DIGEST_LENGTH,
+        ),
+        hashes.SHA256(),
+    )
+
+
+def verify_authentication_proof(
+    public_key_b64, signature, challenge_id, nonce, user_id, device_id, fingerprint
+) -> bool:
+    """Verify only the v2 RSA-PSS authentication proof."""
+    try:
+        public_key, _, _ = parse_rsa_public_key(public_key_b64)
+        public_key.verify(
+            signature,
+            _authentication_proof_message(
+                challenge_id, nonce, user_id, device_id, fingerprint
             ),
             padding.PSS(
                 mgf=padding.MGF1(hashes.SHA256()),

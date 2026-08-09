@@ -4,7 +4,9 @@ BASE_URL = "http://127.0.0.1:5000"
 
 
 def replay():
-    # Paste the exact values from your DEBUG output here:
+    # Historical v1-shaped replay probe. Milestone 3 intentionally rejects this
+    # request shape; it is retained only as a manual retirement check, not as
+    # reproducible security evidence.
     challenge_b64 = "U5tC+VzDAxvNCC9jLpjAIUzswvB49ICRn8Q6pNPx+Os="
     signature_b64 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
     data = {
