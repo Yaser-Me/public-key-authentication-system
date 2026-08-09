@@ -1034,6 +1034,93 @@ def _authorization_is_open(authorization, timestamp):
     )
 
 
+def _issue_enrollment_authorization_in_transaction(
+    connection, user_id, device_id, timestamp, lifetime_seconds
+):
+    """Create one scoped authorization while an existing writer transaction is held."""
+    authorization_id = secrets.token_urlsafe(16)
+    authorization_secret = secrets.token_urlsafe(32)
+    secret_digest = _authorization_secret_digest(authorization_secret)
+    expires_at = (
+        _parse_timestamp(timestamp, "current") + timedelta(seconds=lifetime_seconds)
+    ).isoformat()
+    if connection.execute(
+        "SELECT 1 FROM users WHERE user_id = ?", (user_id,)
+    ).fetchone() is None:
+        raise DatabaseOperationError("The logical identity does not exist.")
+    existing_binding = connection.execute(
+        "SELECT 1 FROM devices WHERE user_id = ? AND device_id = ?",
+        (user_id, device_id),
+    ).fetchone()
+    if existing_binding is not None:
+        raise DuplicateDeviceError("The authenticator binding already exists.")
+
+    earlier = connection.execute(
+        """
+        SELECT
+            authorization_id,
+            expires_at,
+            cancelled_at,
+            consumed_at,
+            consumed_public_key_fingerprint
+        FROM enrollment_authorizations
+        WHERE user_id = ? AND device_id = ?
+        """,
+        (user_id, device_id),
+    ).fetchall()
+    for authorization in earlier:
+        if (authorization["consumed_at"] is None) != (
+            authorization["consumed_public_key_fingerprint"] is None
+        ):
+            raise EnrollmentStateError(
+                "Consumed enrollment authorization state is inconsistent."
+            )
+        if authorization["consumed_at"] is not None:
+            raise EnrollmentStateError(
+                "Consumed enrollment authorization has no corresponding binding."
+            )
+        if _authorization_is_open(authorization, timestamp):
+            connection.execute(
+                """
+                UPDATE enrollment_authorizations
+                SET cancelled_at = ?
+                WHERE authorization_id = ?
+                """,
+                (timestamp, authorization["authorization_id"]),
+            )
+
+    connection.execute(
+        """
+        INSERT INTO enrollment_authorizations (
+            authorization_id,
+            secret_digest,
+            user_id,
+            device_id,
+            created_at,
+            expires_at,
+            cancelled_at,
+            consumed_at,
+            consumed_public_key_fingerprint
+        ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
+        """,
+        (
+            authorization_id,
+            secret_digest,
+            user_id,
+            device_id,
+            timestamp,
+            expires_at,
+        ),
+    )
+    return {
+        "authorization_id": authorization_id,
+        "authorization_secret": authorization_secret,
+        "user_id": user_id,
+        "device_id": device_id,
+        "expires_at": expires_at,
+    }
+
+
 def issue_enrollment_authorization(
     database_path, user_id, device_id, lifetime_seconds=DEFAULT_ENROLLMENT_LIFETIME_SECONDS
 ):
@@ -1043,92 +1130,14 @@ def issue_enrollment_authorization(
     if not isinstance(lifetime_seconds, int) or lifetime_seconds <= 0:
         raise ValueError("lifetime_seconds must be a positive integer.")
 
-    authorization_id = secrets.token_urlsafe(16)
-    authorization_secret = secrets.token_urlsafe(32)
-    secret_digest = _authorization_secret_digest(authorization_secret)
     connection = _open_existing_database(database_path)
     try:
         connection.execute("BEGIN IMMEDIATE")
-        timestamp = utc_now()
-        expires_at = (
-            _parse_timestamp(timestamp, "current") + timedelta(seconds=lifetime_seconds)
-        ).isoformat()
-        if connection.execute(
-            "SELECT 1 FROM users WHERE user_id = ?", (user_id,)
-        ).fetchone() is None:
-            raise DatabaseOperationError("The logical identity does not exist.")
-        existing_binding = connection.execute(
-            "SELECT 1 FROM devices WHERE user_id = ? AND device_id = ?",
-            (user_id, device_id),
-        ).fetchone()
-        if existing_binding is not None:
-            raise DuplicateDeviceError("The authenticator binding already exists.")
-
-        earlier = connection.execute(
-            """
-            SELECT
-                authorization_id,
-                expires_at,
-                cancelled_at,
-                consumed_at,
-                consumed_public_key_fingerprint
-            FROM enrollment_authorizations
-            WHERE user_id = ? AND device_id = ?
-            """,
-            (user_id, device_id),
-        ).fetchall()
-        for authorization in earlier:
-            if (authorization["consumed_at"] is None) != (
-                authorization["consumed_public_key_fingerprint"] is None
-            ):
-                raise EnrollmentStateError(
-                    "Consumed enrollment authorization state is inconsistent."
-                )
-            if authorization["consumed_at"] is not None:
-                raise EnrollmentStateError(
-                    "Consumed enrollment authorization has no corresponding binding."
-                )
-            if _authorization_is_open(authorization, timestamp):
-                connection.execute(
-                    """
-                    UPDATE enrollment_authorizations
-                    SET cancelled_at = ?
-                    WHERE authorization_id = ?
-                    """,
-                    (timestamp, authorization["authorization_id"]),
-                )
-
-        connection.execute(
-            """
-            INSERT INTO enrollment_authorizations (
-                authorization_id,
-                secret_digest,
-                user_id,
-                device_id,
-                created_at,
-                expires_at,
-                cancelled_at,
-                consumed_at,
-                consumed_public_key_fingerprint
-            ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
-            """,
-            (
-                authorization_id,
-                secret_digest,
-                user_id,
-                device_id,
-                timestamp,
-                expires_at,
-            ),
+        authorization = _issue_enrollment_authorization_in_transaction(
+            connection, user_id, device_id, utc_now(), lifetime_seconds
         )
         connection.commit()
-        return {
-            "authorization_id": authorization_id,
-            "authorization_secret": authorization_secret,
-            "user_id": user_id,
-            "device_id": device_id,
-            "expires_at": expires_at,
-        }
+        return authorization
     except (DatabaseError, EnrollmentDeniedError):
         _rollback_quietly(connection)
         raise
@@ -1138,6 +1147,91 @@ def issue_enrollment_authorization(
     except sqlite3.DatabaseError as exc:
         _rollback_quietly(connection)
         raise DatabaseOperationError("Enrollment authorization issuance was rolled back.") from exc
+    finally:
+        connection.close()
+
+
+def prepare_authenticator_replacement(
+    database_path,
+    user_id,
+    old_device_id,
+    new_device_id,
+    reason,
+    lifetime_seconds=DEFAULT_ENROLLMENT_LIFETIME_SECONDS,
+):
+    """Revoke one active binding and authorize one distinct replacement binding."""
+    validate_identifier(user_id, "user_id")
+    validate_identifier(old_device_id, "old_device_id")
+    validate_identifier(new_device_id, "new_device_id")
+    validate_revocation_reason(reason)
+    if old_device_id == new_device_id:
+        raise ValueError("replacement binding must use a different device_id.")
+    if not isinstance(lifetime_seconds, int) or lifetime_seconds <= 0:
+        raise ValueError("lifetime_seconds must be a positive integer.")
+
+    connection = _open_existing_database(database_path)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        timestamp = utc_now()
+        old_binding = connection.execute(
+            """
+            SELECT revoked
+            FROM devices
+            WHERE user_id = ? AND device_id = ?
+            """,
+            (user_id, old_device_id),
+        ).fetchone()
+        if old_binding is None:
+            connection.commit()
+            return {
+                "status": "not_found",
+                "old_device_id": old_device_id,
+                "device_id": new_device_id,
+            }
+        if old_binding["revoked"]:
+            connection.commit()
+            return {
+                "status": "already_revoked",
+                "old_device_id": old_device_id,
+                "device_id": new_device_id,
+            }
+
+        authorization = _issue_enrollment_authorization_in_transaction(
+            connection, user_id, new_device_id, timestamp, lifetime_seconds
+        )
+        connection.execute(
+            """
+            UPDATE devices
+            SET revoked = 1,
+                challenge_b64 = NULL,
+                revoked_at = ?,
+                revocation_reason = ?
+            WHERE user_id = ? AND device_id = ? AND revoked = 0
+            """,
+            (timestamp, reason, user_id, old_device_id),
+        )
+        connection.execute(
+            """
+            DELETE FROM authentication_challenges
+            WHERE user_id = ? AND device_id = ?
+            """,
+            (user_id, old_device_id),
+        )
+        connection.commit()
+        authorization.update(
+            {
+                "status": "prepared",
+                "old_device_id": old_device_id,
+                "revocation_reason": reason,
+            }
+        )
+        return authorization
+    except (DatabaseError, EnrollmentDeniedError):
+        _rollback_quietly(connection)
+        raise
+    except sqlite3.DatabaseError as exc:
+        _rollback_quietly(connection)
+        raise DatabaseOperationError("Authenticator replacement was rolled back.") from exc
     finally:
         connection.close()
 

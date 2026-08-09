@@ -14,6 +14,7 @@ from db_utils import (
     issue_enrollment_authorization,
     list_authenticator_inventory,
     migrate_database,
+    prepare_authenticator_replacement,
     revoke_authenticator,
 )
 
@@ -66,6 +67,15 @@ def build_parser():
     revoke.add_argument("user_id")
     revoke.add_argument("device_id")
     revoke.add_argument("reason")
+
+    replace = subparsers.add_parser(
+        "replacement-prepare",
+        help="Terminally revoke one binding and issue authorization for a distinct replacement.",
+    )
+    replace.add_argument("user_id")
+    replace.add_argument("old_device_id")
+    replace.add_argument("new_device_id")
+    replace.add_argument("reason")
     return parser
 
 
@@ -189,6 +199,34 @@ def main(argv=None):
                 )
             print(json.dumps(output, indent=2, sort_keys=True))
             return 0 if result != "not_found" else 1
+
+        if args.command == "replacement-prepare":
+            before = list_authenticator_inventory(database_path, user_id=args.user_id)
+            active_count = sum(
+                authenticator["state"] == "active"
+                for identity in before
+                for authenticator in identity["authenticators"]
+            )
+            result = prepare_authenticator_replacement(
+                database_path,
+                args.user_id,
+                args.old_device_id,
+                args.new_device_id,
+                args.reason,
+            )
+            if result["status"] == "prepared" and active_count == 1:
+                result["warning"] = (
+                    "The old binding was the last active authenticator. If enrollment "
+                    "does not complete, it remains revoked; retry with the same new credential."
+                )
+            if result["status"] == "already_revoked":
+                result["warning"] = (
+                    "No new authorization was issued. Inspect inventory; if the "
+                    "replacement binding is absent and the earlier authorization secret "
+                    "is unavailable, explicitly issue a new enrollment authorization."
+                )
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 0 if result["status"] == "prepared" else 1
     except (DatabaseError, ValueError) as exc:
         print(json.dumps({"status": "error", "error": str(exc)}))
         return 1

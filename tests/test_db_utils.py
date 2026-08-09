@@ -31,6 +31,7 @@ from db_utils import (
     issue_enrollment_authorization,
     list_authenticator_inventory,
     migrate_database,
+    prepare_authenticator_replacement,
     register_device,
     revoke_authenticator,
     run_if_binding_active,
@@ -1211,6 +1212,219 @@ class DatabaseTests(unittest.TestCase):
 
         with self.assertRaises(DuplicateDeviceError):
             register_device(self.database_path, "student1", "new1", public_key_b64, fingerprint)
+
+    def test_replacement_preparation_is_atomic_and_keeps_other_bindings_active(self):
+        self._create_identity()
+        old_public_key, old_fingerprint = self._public_key_values()
+        other_public_key, other_fingerprint = self._public_key_values()
+        register_device(
+            self.database_path, "student1", "old1", old_public_key, old_fingerprint
+        )
+        register_device(
+            self.database_path, "student1", "other1", other_public_key, other_fingerprint
+        )
+        old_challenge = issue_authentication_challenge(
+            self.database_path, "student1", "old1"
+        )
+
+        replacement = prepare_authenticator_replacement(
+            self.database_path,
+            "student1",
+            "old1",
+            "replacement1",
+            "suspected_compromise",
+        )
+
+        self.assertEqual(replacement["status"], "prepared")
+        self.assertEqual(replacement["user_id"], "student1")
+        self.assertEqual(replacement["device_id"], "replacement1")
+        self.assertTrue(replacement["authorization_secret"])
+        old = get_device(self.database_path, "student1", "old1")
+        other = get_device(self.database_path, "student1", "other1")
+        self.assertTrue(old["revoked"])
+        self.assertEqual(old["public_key_fingerprint"], old_fingerprint)
+        self.assertEqual(old["revocation_reason"], "suspected_compromise")
+        self.assertFalse(other["revoked"])
+        self.assertEqual(other["public_key_fingerprint"], other_fingerprint)
+        self.assertIsNone(get_device(self.database_path, "student1", "replacement1"))
+        self.assertIsNone(
+            get_authentication_challenge(self.database_path, old_challenge["challenge_id"])
+        )
+
+        connection = sqlite3.connect(self.database_path)
+        try:
+            row = connection.execute(
+                """
+                SELECT user_id, device_id, consumed_at, cancelled_at
+                FROM enrollment_authorizations
+                WHERE authorization_id = ?
+                """,
+                (replacement["authorization_id"],),
+            ).fetchone()
+        finally:
+            connection.close()
+        self.assertEqual(row, ("student1", "replacement1", None, None))
+
+    def test_replacement_preparation_rolls_back_when_revocation_cannot_commit(self):
+        self._create_identity()
+        old_public_key, old_fingerprint = self._public_key_values()
+        register_device(
+            self.database_path, "student1", "old1", old_public_key, old_fingerprint
+        )
+        connection = sqlite3.connect(self.database_path)
+        try:
+            connection.execute(
+                """
+                CREATE TRIGGER reject_replacement_revocation
+                BEFORE UPDATE OF revoked ON devices
+                WHEN NEW.revoked = 1
+                BEGIN
+                    SELECT RAISE(ABORT, 'simulated replacement failure');
+                END
+                """
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        with self.assertRaises(DatabaseOperationError):
+            prepare_authenticator_replacement(
+                self.database_path,
+                "student1",
+                "old1",
+                "replacement1",
+                "lost",
+            )
+
+        self.assertFalse(get_device(self.database_path, "student1", "old1")["revoked"])
+        connection = sqlite3.connect(self.database_path)
+        try:
+            count = connection.execute(
+                """
+                SELECT COUNT(*) FROM enrollment_authorizations
+                WHERE user_id = ? AND device_id = ?
+                """,
+                ("student1", "replacement1"),
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        self.assertEqual(count, 0)
+
+    def test_replacement_preparation_refuses_an_existing_destination_before_revocation(self):
+        self._create_identity()
+        old_public_key, old_fingerprint = self._public_key_values()
+        existing_public_key, existing_fingerprint = self._public_key_values()
+        register_device(
+            self.database_path, "student1", "old1", old_public_key, old_fingerprint
+        )
+        register_device(
+            self.database_path,
+            "student1",
+            "replacement1",
+            existing_public_key,
+            existing_fingerprint,
+        )
+
+        with self.assertRaises(DuplicateDeviceError):
+            prepare_authenticator_replacement(
+                self.database_path,
+                "student1",
+                "old1",
+                "replacement1",
+                "planned_replacement",
+            )
+
+        self.assertFalse(get_device(self.database_path, "student1", "old1")["revoked"])
+        self.assertFalse(
+            get_device(self.database_path, "student1", "replacement1")["revoked"]
+        )
+
+    def test_replacement_retry_without_the_secret_does_not_reactivate_old_binding(self):
+        self._create_identity()
+        old_public_key, old_fingerprint = self._public_key_values()
+        register_device(
+            self.database_path, "student1", "old1", old_public_key, old_fingerprint
+        )
+        first = prepare_authenticator_replacement(
+            self.database_path,
+            "student1",
+            "old1",
+            "replacement1",
+            "lost",
+        )
+        retry = prepare_authenticator_replacement(
+            self.database_path,
+            "student1",
+            "old1",
+            "replacement1",
+            "lost",
+        )
+        replacement_authorization = issue_enrollment_authorization(
+            self.database_path, "student1", "replacement1"
+        )
+
+        self.assertEqual(retry["status"], "already_revoked")
+        self.assertNotIn("authorization_secret", retry)
+        self.assertNotEqual(
+            replacement_authorization["authorization_id"], first["authorization_id"]
+        )
+        self.assertTrue(get_device(self.database_path, "student1", "old1")["revoked"])
+        connection = sqlite3.connect(self.database_path)
+        try:
+            first_cancelled_at = connection.execute(
+                """
+                SELECT cancelled_at FROM enrollment_authorizations
+                WHERE authorization_id = ?
+                """,
+                (first["authorization_id"],),
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        self.assertIsNotNone(first_cancelled_at)
+
+    def test_concurrent_replacement_preparation_has_one_winner(self):
+        self._create_identity()
+        old_public_key, old_fingerprint = self._public_key_values()
+        register_device(
+            self.database_path, "student1", "old1", old_public_key, old_fingerprint
+        )
+
+        start = threading.Barrier(2)
+
+        def prepare_once():
+            start.wait(timeout=5)
+            return prepare_authenticator_replacement(
+                self.database_path,
+                "student1",
+                "old1",
+                "replacement1",
+                "planned_replacement",
+            )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(
+                executor.map(
+                    lambda _: prepare_once(),
+                    range(2),
+                )
+            )
+
+        self.assertEqual(sorted(result["status"] for result in results), [
+            "already_revoked",
+            "prepared",
+        ])
+        connection = sqlite3.connect(self.database_path)
+        try:
+            count = connection.execute(
+                """
+                SELECT COUNT(*) FROM enrollment_authorizations
+                WHERE user_id = ? AND device_id = ?
+                """,
+                ("student1", "replacement1"),
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        self.assertEqual(count, 1)
 
     def test_challenge_is_consumed_once_across_concurrent_connections(self):
         self._create_identity()

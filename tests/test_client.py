@@ -5,12 +5,14 @@ import threading
 import unittest
 import getpass
 import base64
+from urllib.parse import urlparse
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 import client
 import credential_store
+import server
 from credential_store import CredentialError, credential_paths, load_credential
 from crypto_utils import (
     encrypt_private_key,
@@ -19,7 +21,14 @@ from crypto_utils import (
     public_key_b64_from_private_key,
     validate_rsa_public_key,
 )
-from db_utils import create_identity, initialize_database, register_device, revoke_authenticator
+from db_utils import (
+    create_identity,
+    get_device,
+    initialize_database,
+    prepare_authenticator_replacement,
+    register_device,
+    revoke_authenticator,
+)
 
 
 PASSPHRASE = "correct horse battery"
@@ -90,6 +99,91 @@ class ClientCredentialTests(unittest.TestCase):
 
         self.assertEqual(self._current_path().read_bytes(), original)
         self.assertEqual(post.call_count, 1)
+
+    def test_replacement_retry_preserves_one_new_credential_after_lost_response(self):
+        database_path = Path(self._temp_dir.name) / "identity_lab.sqlite3"
+        initialize_database(database_path)
+        create_identity(database_path, self.user_id)
+        _, old_public = generate_rsa_keypair()
+        old_public_key_b64, old_fingerprint = validate_rsa_public_key(
+            base64.b64encode(old_public).decode("ascii")
+        )
+        register_device(
+            database_path,
+            self.user_id,
+            "old1",
+            old_public_key_b64,
+            old_fingerprint,
+        )
+        replacement = prepare_authenticator_replacement(
+            database_path,
+            self.user_id,
+            "old1",
+            self.device_id,
+            "suspected_compromise",
+        )
+        original_server_config = {
+            "TESTING": server.app.config["TESTING"],
+            "DATABASE_PATH": server.app.config["DATABASE_PATH"],
+        }
+        self.addCleanup(server.app.config.update, original_server_config)
+        server.app.config.update(TESTING=True, DATABASE_PATH=str(database_path))
+        captured = {}
+
+        def bind_then_lose_response(url, json, timeout):
+            captured.update(json)
+            response = server.app.test_client().post(urlparse(url).path, json=json)
+            self.assertEqual(response.status_code, 200)
+            raise client.requests.Timeout()
+
+        with patch("client.requests.post", side_effect=bind_then_lose_response):
+            uncertain = client.register_device(
+                self.user_id,
+                self.device_id,
+                replacement["authorization_id"],
+                replacement["authorization_secret"],
+                PASSPHRASE,
+                self.root,
+            )
+
+        current_path = self._current_path()
+        credential_before_retry = current_path.read_bytes()
+        self.assertEqual(uncertain["status"], "enrollment_outcome_uncertain")
+        self.assertTrue(current_path.exists())
+        self.assertTrue(get_device(database_path, self.user_id, "old1")["revoked"])
+
+        def dispatch_to_server(url, json, timeout):
+            response = server.app.test_client().post(urlparse(url).path, json=json)
+            result = Mock()
+            result.status_code = response.status_code
+            result.ok = response.status_code < 400
+            result.json.return_value = response.get_json()
+            return result
+
+        with patch("client.requests.post", side_effect=dispatch_to_server):
+            reconciled = client.retry_device_enrollment(
+                self.user_id,
+                self.device_id,
+                replacement["authorization_id"],
+                replacement["authorization_secret"],
+                PASSPHRASE,
+                self.root,
+            )
+
+        _, _, credential_fingerprint = load_credential(
+            current_path, self.user_id, self.device_id, PASSPHRASE
+        )
+        self.assertEqual(reconciled["status"], "reconciled")
+        self.assertEqual(current_path.read_bytes(), credential_before_retry)
+        self.assertEqual(captured["public_key_b64"], get_device(
+            database_path, self.user_id, self.device_id
+        )["public_key_b64"])
+        self.assertEqual(
+            credential_fingerprint,
+            get_device(database_path, self.user_id, self.device_id)[
+                "public_key_fingerprint"
+            ],
+        )
 
     def test_denial_timeout_and_connection_failure_preserve_same_credential(self):
         denied = Mock()

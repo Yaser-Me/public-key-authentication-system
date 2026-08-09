@@ -24,6 +24,7 @@ from db_utils import (
     get_device,
     initialize_database,
     issue_enrollment_authorization,
+    prepare_authenticator_replacement,
     register_device,
     revoke_authenticator,
 )
@@ -385,6 +386,75 @@ class AuthenticationFlowTests(unittest.TestCase):
         self.assertNotEqual(first_challenge["challenge_id"], second_challenge["challenge_id"])
         self.assertEqual(first.status_code, 200)
         self.assertEqual(second.status_code, 200)
+
+    def test_replacement_keeps_old_revoked_and_other_authenticator_usable(self):
+        old_private, _, _, _, old_fingerprint, _ = self._bind(device_id="old1")
+        other_private, _, _, _, other_fingerprint, _ = self._bind(device_id="other1")
+        old_challenge = self._request_challenge(device_id="old1").get_json()
+        old_payload = self._signed_login_payload(old_private, old_challenge)
+
+        replacement = prepare_authenticator_replacement(
+            self._database_path,
+            self.user_id,
+            "old1",
+            "replacement1",
+            "suspected_compromise",
+        )
+        replacement_private, replacement_public = generate_rsa_keypair()
+        binding_payload, replacement_fingerprint = self._binding_payload(
+            replacement_private,
+            replacement_public,
+            replacement,
+            device_id="replacement1",
+        )
+        invalid_payload = dict(binding_payload)
+        invalid_payload["enrollment_proof"] = base64.b64encode(b"invalid").decode(
+            "ascii"
+        )
+        failed_replacement = self.client.post(
+            "/authenticator/bind", json=invalid_payload
+        )
+        self.assertEqual(failed_replacement.status_code, 403)
+        self.assertTrue(get_device(self._database_path, self.user_id, "old1")["revoked"])
+        self.assertIsNone(get_device(self._database_path, self.user_id, "replacement1"))
+        binding_response = self.client.post("/authenticator/bind", json=binding_payload)
+
+        old_response = self.client.post("/login/verify", json=old_payload)
+        replacement_challenge = self._request_challenge(device_id="replacement1").get_json()
+        replacement_response = self.client.post(
+            "/login/verify",
+            json=self._signed_login_payload(replacement_private, replacement_challenge),
+        )
+        other_challenge = self._request_challenge(device_id="other1").get_json()
+        other_response = self.client.post(
+            "/login/verify",
+            json=self._signed_login_payload(other_private, other_challenge),
+        )
+
+        self.assertEqual(replacement["status"], "prepared")
+        self.assertEqual(binding_response.status_code, 200)
+        self.assertEqual(old_response.status_code, 403)
+        self.assertEqual(replacement_response.status_code, 200)
+        self.assertEqual(other_response.status_code, 200)
+        self.assertTrue(get_device(self._database_path, self.user_id, "old1")["revoked"])
+        self.assertIsNotNone(get_device(self._database_path, self.user_id, "replacement1"))
+        self.assertEqual(
+            get_device(self._database_path, self.user_id, "old1")[
+                "public_key_fingerprint"
+            ],
+            old_fingerprint,
+        )
+        self.assertFalse(
+            get_device(self._database_path, self.user_id, "other1")["revoked"]
+        )
+        self.assertEqual(
+            get_device(self._database_path, self.user_id, "other1")[
+                "public_key_fingerprint"
+            ],
+            other_fingerprint,
+        )
+        self.assertNotEqual(replacement_fingerprint, old_fingerprint)
+        self.assertNotEqual(replacement_fingerprint, other_fingerprint)
 
     def test_concurrent_verification_allows_one_success(self):
         private_key, _, _, _, _, _ = self._bind()
