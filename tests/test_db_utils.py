@@ -342,13 +342,14 @@ class DatabaseTests(unittest.TestCase):
         finally:
             connection.close()
 
-    def test_initialization_is_idempotent_and_reports_v3_status(self):
+    def test_initialization_is_idempotent_and_reports_v4_status(self):
         self.assertFalse(initialize_database(self.database_path))
 
         status = get_database_status(self.database_path)
 
         self.assertTrue(status["initialized"])
-        self.assertEqual(status["schema_version"], 3)
+        self.assertEqual(status["schema_version"], 4)
+        self.assertEqual(status["security_events"], 1)
         self.assertEqual(status["integrity"], "ok")
         self.assertEqual(status["users"], 0)
         self.assertEqual(status["devices"], 0)
@@ -469,7 +470,7 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(historical["revoked_at"], "2026-01-02T00:00:00+00:00")
         self.assertIsNone(historical["revocation_reason"])
 
-    def test_v2_migration_preserves_lifecycle_state_and_retires_legacy_challenge(self):
+    def test_v2_migration_to_v4_preserves_state_and_retires_legacy_challenge(self):
         self.database_path.unlink()
         create_v2_database(self.database_path)
         public_key_b64, fingerprint = self._public_key_values()
@@ -504,7 +505,7 @@ class DatabaseTests(unittest.TestCase):
 
         current = get_database_status(self.database_path)
         self.assertTrue(current["initialized"])
-        self.assertEqual(current["schema_version"], 3)
+        self.assertEqual(current["schema_version"], 4)
         migrated = get_device(self.database_path, "student1", "laptop1")
         self.assertEqual(migrated["public_key_b64"], public_key_b64)
         self.assertEqual(migrated["public_key_fingerprint"], fingerprint)
@@ -1069,16 +1070,25 @@ class DatabaseTests(unittest.TestCase):
         finally:
             connection.close()
 
-        with self.assertRaises(DatabaseOperationError):
-            bind_authenticator(
-                self.database_path,
-                "student1",
-                "laptop1",
-                public_key_b64,
-                fingerprint,
-                authorization["authorization_id"],
-                authorization["authorization_secret"],
-            )
+        # The trigger is deliberate failure injection; production schema validation
+        # rejects persisted triggers before normal operations.
+        with patch.object(db_utils, "_reject_unsupported_schema_extensions"):
+            with self.assertRaises(DatabaseOperationError):
+                bind_authenticator(
+                    self.database_path,
+                    "student1",
+                    "laptop1",
+                    public_key_b64,
+                    fingerprint,
+                    authorization["authorization_id"],
+                    authorization["authorization_secret"],
+                )
+        connection = sqlite3.connect(self.database_path)
+        try:
+            connection.execute("DROP TRIGGER force_device_insert_failure")
+            connection.commit()
+        finally:
+            connection.close()
         self.assertIsNone(get_device(self.database_path, "student1", "laptop1"))
         self.assertIsNone(self._authorization_row(authorization["authorization_id"])["consumed_at"])
 
@@ -1287,14 +1297,23 @@ class DatabaseTests(unittest.TestCase):
         finally:
             connection.close()
 
-        with self.assertRaises(DatabaseOperationError):
-            prepare_authenticator_replacement(
-                self.database_path,
-                "student1",
-                "old1",
-                "replacement1",
-                "lost",
-            )
+        # The trigger is deliberate failure injection; production schema validation
+        # rejects persisted triggers before normal operations.
+        with patch.object(db_utils, "_reject_unsupported_schema_extensions"):
+            with self.assertRaises(DatabaseOperationError):
+                prepare_authenticator_replacement(
+                    self.database_path,
+                    "student1",
+                    "old1",
+                    "replacement1",
+                    "lost",
+                )
+        connection = sqlite3.connect(self.database_path)
+        try:
+            connection.execute("DROP TRIGGER reject_replacement_revocation")
+            connection.commit()
+        finally:
+            connection.close()
 
         self.assertFalse(get_device(self.database_path, "student1", "old1")["revoked"])
         connection = sqlite3.connect(self.database_path)
@@ -1530,6 +1549,9 @@ class DatabaseTests(unittest.TestCase):
 
             def rollback(self):
                 self.connection.rollback()
+
+            def commit(self):
+                self.connection.commit()
 
             def close(self):
                 self.connection.close()

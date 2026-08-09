@@ -9,16 +9,19 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 DATABASE_ENV_VAR = "PKAS_DATABASE_PATH"
 DATABASE_NAME = "identity_lab.sqlite3"
 APP_DIRECTORY_NAME = "PublicKeyAuthenticationSystem"
 DEFAULT_ENROLLMENT_LIFETIME_SECONDS = 10 * 60
 DEFAULT_CHALLENGE_LIFETIME_SECONDS = 5 * 60
 MAX_OUTSTANDING_CHALLENGES_PER_BINDING = 8
+MAX_SECURITY_EVENT_QUERY_LIMIT = 1000
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 AUTHORIZATION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 CHALLENGE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{43}$")
+EVENT_TYPE_PATTERN = re.compile(r"^[a-z][a-z0-9_.]{0,63}$")
+REASON_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
 REVOCATION_REASONS = {
     "lost",
     "suspected_compromise",
@@ -115,6 +118,38 @@ CREATE TABLE authentication_challenges (
         REFERENCES devices(user_id, device_id) ON DELETE CASCADE,
     CHECK (consumed_at IS NULL OR consumed_at >= created_at)
 )
+"""
+
+SECURITY_EVENTS_TABLE_SQL = """
+CREATE TABLE security_events (
+    event_id INTEGER PRIMARY KEY,
+    occurred_at TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    reason_code TEXT NOT NULL,
+    actor_kind TEXT NOT NULL,
+    actor_assurance TEXT NOT NULL,
+    user_id TEXT,
+    device_id TEXT,
+    related_device_id TEXT,
+    public_key_fingerprint TEXT,
+    interaction_id TEXT
+)
+"""
+
+ENROLLMENT_AUTHORIZATIONS_SCOPE_INDEX_SQL = """
+CREATE INDEX enrollment_authorizations_scope_index
+ON enrollment_authorizations (user_id, device_id)
+"""
+
+AUTHENTICATION_CHALLENGES_BINDING_INDEX_SQL = """
+CREATE INDEX authentication_challenges_binding_index
+ON authentication_challenges (user_id, device_id)
+"""
+
+SECURITY_EVENTS_SCOPE_INDEX_SQL = """
+CREATE INDEX security_events_scope_index
+ON security_events (user_id, device_id, event_id)
 """
 
 
@@ -243,10 +278,10 @@ def _open_raw_database(database_path):
 def _open_existing_database(database_path):
     """Open only the current schema version for normal runtime operations."""
     connection, schema_version = _open_raw_database(database_path)
-    if schema_version in (1, 2):
+    if schema_version in (1, 2, 3):
         connection.close()
         raise DatabaseMigrationRequiredError(
-            "Local state requires the explicit migration to schema v3. "
+            "Local state requires the explicit migration to schema v4. "
             "Run 'python manage.py migrate'."
         )
     if schema_version != SCHEMA_VERSION:
@@ -256,14 +291,14 @@ def _open_existing_database(database_path):
             f"expected {SCHEMA_VERSION}."
         )
     try:
-        _validate_v3_schema(connection)
+        _validate_v4_schema(connection)
     except DatabaseError:
         connection.close()
         raise
     except sqlite3.DatabaseError as exc:
         connection.close()
         raise DatabaseSchemaError(
-            "Local v3 state could not be validated safely."
+            "Local v4 state could not be validated safely."
         ) from exc
     return connection
 
@@ -281,7 +316,7 @@ def _check_existing_database_for_init(path):
     )
 
 
-def _create_v3_schema(connection):
+def _create_v4_schema(connection):
     connection.execute(
         """
         CREATE TABLE users (
@@ -293,33 +328,30 @@ def _create_v3_schema(connection):
     connection.execute(V2_DEVICES_TABLE_SQL)
     _create_enrollment_authorization_schema(connection)
     _create_authentication_challenge_schema(connection)
+    _create_security_event_schema(connection)
     connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
 
 def _create_enrollment_authorization_schema(connection):
     """Create the one Milestone 1 table shared by initialization and migration."""
     connection.execute(ENROLLMENT_AUTHORIZATIONS_TABLE_SQL)
-    connection.execute(
-        """
-        CREATE INDEX enrollment_authorizations_scope_index
-        ON enrollment_authorizations (user_id, device_id)
-        """
-    )
+    connection.execute(ENROLLMENT_AUTHORIZATIONS_SCOPE_INDEX_SQL)
 
 
 def _create_authentication_challenge_schema(connection):
     """Create the explicit v3 authentication challenge state."""
     connection.execute(AUTHENTICATION_CHALLENGES_TABLE_SQL)
-    connection.execute(
-        """
-        CREATE INDEX authentication_challenges_binding_index
-        ON authentication_challenges (user_id, device_id)
-        """
-    )
+    connection.execute(AUTHENTICATION_CHALLENGES_BINDING_INDEX_SQL)
+
+
+def _create_security_event_schema(connection):
+    """Create the small application-native security evidence table."""
+    connection.execute(SECURITY_EVENTS_TABLE_SQL)
+    connection.execute(SECURITY_EVENTS_SCOPE_INDEX_SQL)
 
 
 def initialize_database(database_path=None):
-    """Create v3 local state without replacing existing data."""
+    """Create v4 local state without replacing existing data."""
     path = Path(database_path or get_default_database_path())
 
     try:
@@ -348,8 +380,17 @@ def initialize_database(database_path=None):
         _configure_connection(connection)
         # SQLite DDL needs an explicit transaction for all-or-nothing setup.
         connection.execute("BEGIN IMMEDIATE")
-        _create_v3_schema(connection)
-        _validate_v3_schema(connection)
+        _create_v4_schema(connection)
+        _validate_v4_schema(connection)
+        _insert_security_event(
+            connection,
+            utc_now(),
+            "state.initialized",
+            "success",
+            "schema_v4",
+            "local_administrator",
+            "trusted_local_account",
+        )
         connection.commit()
     except (OSError, sqlite3.DatabaseError, DatabaseError) as exc:
         if connection is not None:
@@ -445,6 +486,34 @@ def _require_supported_table_definition(
         )
 
 
+def _require_supported_index_definition(connection, index_name, expected_definition):
+    """Require the application-owned index used by a supported schema version."""
+    row = connection.execute(
+        "SELECT sql FROM sqlite_schema WHERE type = 'index' AND name = ?",
+        (index_name,),
+    ).fetchone()
+    if row is None or row["sql"] is None:
+        raise DatabaseSchemaError("Local state is missing a required application index.")
+    if _normalize_schema_sql(row["sql"]) != _normalize_schema_sql(expected_definition):
+        raise DatabaseSchemaError("Local state has an unsupported index definition.")
+
+
+def _reject_unsupported_schema_extensions(connection):
+    """Reject persisted triggers or views that can change application semantics."""
+    row = connection.execute(
+        """
+        SELECT type, name
+        FROM sqlite_schema
+        WHERE type IN ('trigger', 'view')
+        LIMIT 1
+        """
+    ).fetchone()
+    if row is not None:
+        raise DatabaseSchemaError(
+            "Local state contains unsupported triggers or views."
+        )
+
+
 def _require_schema_properties(
     connection,
     table_name,
@@ -526,6 +595,7 @@ def _validate_user_and_device_schema(connection, include_revocation_reason):
 
 def _validate_v1_schema(connection):
     _validate_user_and_device_schema(connection, include_revocation_reason=False)
+    _reject_unsupported_schema_extensions(connection)
 
 
 def _validate_v2_schema(connection):
@@ -561,6 +631,12 @@ def _validate_v2_schema(connection):
         "enrollment_authorizations",
         (ENROLLMENT_AUTHORIZATIONS_TABLE_SQL,),
     )
+    _require_supported_index_definition(
+        connection,
+        "enrollment_authorizations_scope_index",
+        ENROLLMENT_AUTHORIZATIONS_SCOPE_INDEX_SQL,
+    )
+    _reject_unsupported_schema_extensions(connection)
 
 
 def _validate_v3_schema(connection):
@@ -596,6 +672,56 @@ def _validate_v3_schema(connection):
         "authentication_challenges",
         (AUTHENTICATION_CHALLENGES_TABLE_SQL,),
     )
+    _require_supported_index_definition(
+        connection,
+        "authentication_challenges_binding_index",
+        AUTHENTICATION_CHALLENGES_BINDING_INDEX_SQL,
+    )
+    _reject_unsupported_schema_extensions(connection)
+
+
+def _validate_v4_schema(connection):
+    """Reject current state missing the application-owned evidence table."""
+    _validate_v3_schema(connection)
+    _require_schema_properties(
+        connection,
+        "security_events",
+        {
+            "event_id",
+            "occurred_at",
+            "event_type",
+            "outcome",
+            "reason_code",
+            "actor_kind",
+            "actor_assurance",
+            "user_id",
+            "device_id",
+            "related_device_id",
+            "public_key_fingerprint",
+            "interaction_id",
+        },
+        {
+            "event_id",
+            "occurred_at",
+            "event_type",
+            "outcome",
+            "reason_code",
+            "actor_kind",
+            "actor_assurance",
+        },
+        ("event_id",),
+    )
+    _require_supported_table_definition(
+        connection,
+        "security_events",
+        (SECURITY_EVENTS_TABLE_SQL,),
+    )
+    _require_supported_index_definition(
+        connection,
+        "security_events_scope_index",
+        SECURITY_EVENTS_SCOPE_INDEX_SQL,
+    )
+    _reject_unsupported_schema_extensions(connection)
 
 
 def _apply_v2_schema_changes(connection):
@@ -611,13 +737,20 @@ def _apply_v3_schema_changes(connection):
     # They cannot become valid v3 authentication state after migration.
     connection.execute("UPDATE devices SET challenge_b64 = NULL")
     _create_authentication_challenge_schema(connection)
+    connection.execute("PRAGMA user_version = 3")
+
+
+def _apply_v4_schema_changes(connection):
+    """Add application-native security evidence without rewriting history."""
+    _create_security_event_schema(connection)
     connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
 
 def migrate_database(database_path=None):
-    """Explicitly migrate supported v1 or v2 local state to v3 atomically."""
+    """Explicitly migrate supported v1, v2, or v3 state to v4 atomically."""
     path = database_path or get_default_database_path()
     connection, schema_version = _open_raw_database(path)
+    source_version = schema_version
     try:
         connection.execute("BEGIN IMMEDIATE")
         if schema_version == 1:
@@ -627,17 +760,32 @@ def migrate_database(database_path=None):
             _validate_v2_schema(connection)
         elif schema_version == 2:
             _validate_v2_schema(connection)
-        elif schema_version == SCHEMA_VERSION:
+        elif schema_version == 3:
             _validate_v3_schema(connection)
+        elif schema_version == SCHEMA_VERSION:
+            _validate_v4_schema(connection)
             connection.commit()
             return False
         else:
             raise DatabaseSchemaError(
-                f"Unsupported database schema version {schema_version}; expected 1, 2, or {SCHEMA_VERSION}."
+                f"Unsupported database schema version {schema_version}; expected 1, 2, 3, or {SCHEMA_VERSION}."
             )
-        _apply_v3_schema_changes(connection)
+        if schema_version in (1, 2):
+            _apply_v3_schema_changes(connection)
+            _verify_database_integrity(connection)
+            _validate_v3_schema(connection)
+        _apply_v4_schema_changes(connection)
         _verify_database_integrity(connection)
-        _validate_v3_schema(connection)
+        _validate_v4_schema(connection)
+        _insert_security_event(
+            connection,
+            utc_now(),
+            "state.migrated",
+            "success",
+            f"schema_v{source_version}_to_v4",
+            "local_administrator",
+            "trusted_local_account",
+        )
         connection.commit()
         return True
     except DatabaseError:
@@ -666,6 +814,7 @@ def get_database_status(database_path=None):
         "integrity": "missing",
         "users": 0,
         "devices": 0,
+        "security_events": 0,
     }
 
     try:
@@ -682,19 +831,16 @@ def get_database_status(database_path=None):
     try:
         connection, schema_version = _open_raw_database(path)
         status["schema_version"] = schema_version
-        if schema_version == 1:
-            _validate_v1_schema(connection)
+        if schema_version in (1, 2, 3):
+            if schema_version == 1:
+                _validate_v1_schema(connection)
+            elif schema_version == 2:
+                _validate_v2_schema(connection)
+            else:
+                _validate_v3_schema(connection)
             status["integrity"] = "migration_required"
             status["error"] = (
-                "Local state requires the explicit migration to schema v3. "
-                "Run 'python manage.py migrate'."
-            )
-            return status
-        if schema_version == 2:
-            _validate_v2_schema(connection)
-            status["integrity"] = "migration_required"
-            status["error"] = (
-                "Local state requires the explicit migration to schema v3. "
+                "Local state requires the explicit migration to schema v4. "
                 "Run 'python manage.py migrate'."
             )
             return status
@@ -706,7 +852,7 @@ def get_database_status(database_path=None):
             )
             return status
 
-        _validate_v3_schema(connection)
+        _validate_v4_schema(connection)
 
         status.update(
             {
@@ -714,6 +860,9 @@ def get_database_status(database_path=None):
                 "integrity": "ok",
                 "users": connection.execute("SELECT COUNT(*) FROM users").fetchone()[0],
                 "devices": connection.execute("SELECT COUNT(*) FROM devices").fetchone()[0],
+                "security_events": connection.execute(
+                    "SELECT COUNT(*) FROM security_events"
+                ).fetchone()[0],
             }
         )
         return status
@@ -737,16 +886,218 @@ def _rollback_quietly(connection):
         pass
 
 
+def _insert_security_event(
+    connection,
+    occurred_at,
+    event_type,
+    outcome,
+    reason_code,
+    actor_kind,
+    actor_assurance,
+    user_id=None,
+    device_id=None,
+    related_device_id=None,
+    public_key_fingerprint=None,
+    interaction_id=None,
+):
+    """Insert sanitized evidence using the caller's existing transaction."""
+    values = (
+        occurred_at,
+        event_type,
+        outcome,
+        reason_code,
+        actor_kind,
+        actor_assurance,
+        user_id,
+        device_id,
+        related_device_id,
+        public_key_fingerprint,
+        interaction_id,
+    )
+    cursor = connection.execute(
+        """
+        INSERT INTO security_events (
+            occurred_at,
+            event_type,
+            outcome,
+            reason_code,
+            actor_kind,
+            actor_assurance,
+            user_id,
+            device_id,
+            related_device_id,
+            public_key_fingerprint,
+            interaction_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        values,
+    )
+    if cursor.rowcount != 1 or cursor.lastrowid is None:
+        raise sqlite3.IntegrityError("Security evidence was not inserted.")
+    stored_event = connection.execute(
+        """
+        SELECT
+            occurred_at,
+            event_type,
+            outcome,
+            reason_code,
+            actor_kind,
+            actor_assurance,
+            user_id,
+            device_id,
+            related_device_id,
+            public_key_fingerprint,
+            interaction_id
+        FROM security_events
+        WHERE event_id = ?
+        """,
+        (cursor.lastrowid,),
+    ).fetchone()
+    if stored_event is None or tuple(stored_event) != values:
+        raise sqlite3.IntegrityError("Security evidence did not persist as expected.")
+
+
+def record_security_observation(
+    database_path,
+    event_type,
+    reason_code,
+    challenge_id=None,
+):
+    """Persist a denial, deriving optional context only from trusted challenge state."""
+    if event_type not in {
+        "authentication.denied",
+        "authentication.protocol_rejected",
+        "enrollment.denied",
+    }:
+        raise ValueError("event_type is not an observational security event.")
+    if not isinstance(reason_code, str) or not REASON_CODE_PATTERN.fullmatch(reason_code):
+        raise ValueError("reason_code is invalid.")
+    if challenge_id is not None:
+        validate_challenge_id(challenge_id)
+
+    connection = _open_existing_database(database_path)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        challenge = None
+        if challenge_id is not None:
+            challenge = connection.execute(
+                """
+                SELECT challenge_id, user_id, device_id, public_key_fingerprint
+                FROM authentication_challenges
+                WHERE challenge_id = ?
+                """,
+                (challenge_id,),
+            ).fetchone()
+        _insert_security_event(
+            connection,
+            utc_now(),
+            event_type,
+            "denied",
+            reason_code,
+            "client",
+            "unverified_claim",
+            user_id=challenge["user_id"] if challenge else None,
+            device_id=challenge["device_id"] if challenge else None,
+            public_key_fingerprint=(
+                challenge["public_key_fingerprint"] if challenge else None
+            ),
+            interaction_id=challenge["challenge_id"] if challenge else None,
+        )
+        connection.commit()
+    except sqlite3.DatabaseError as exc:
+        _rollback_quietly(connection)
+        raise DatabaseOperationError("Security evidence could not be recorded.") from exc
+    finally:
+        connection.close()
+
+
+def list_security_events(
+    database_path,
+    user_id=None,
+    device_id=None,
+    event_type=None,
+    limit=100,
+):
+    """Return a bounded chronological security-event view for local inspection."""
+    if user_id is not None:
+        validate_identifier(user_id, "user_id")
+    if device_id is not None:
+        validate_identifier(device_id, "device_id")
+    if event_type is not None and (
+        not isinstance(event_type, str) or not EVENT_TYPE_PATTERN.fullmatch(event_type)
+    ):
+        raise ValueError("event_type is invalid.")
+    if not isinstance(limit, int) or not 1 <= limit <= MAX_SECURITY_EVENT_QUERY_LIMIT:
+        raise ValueError(
+            f"limit must be between 1 and {MAX_SECURITY_EVENT_QUERY_LIMIT}."
+        )
+
+    connection = _open_existing_database(database_path)
+    try:
+        conditions = []
+        parameters = []
+        if user_id is not None:
+            conditions.append("user_id = ?")
+            parameters.append(user_id)
+        if device_id is not None:
+            conditions.append("(device_id = ? OR related_device_id = ?)")
+            parameters.extend((device_id, device_id))
+        if event_type is not None:
+            conditions.append("event_type = ?")
+            parameters.append(event_type)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        parameters.append(limit)
+        rows = connection.execute(
+            f"""
+            SELECT
+                event_id,
+                occurred_at,
+                event_type,
+                outcome,
+                reason_code,
+                actor_kind,
+                actor_assurance,
+                user_id,
+                device_id,
+                related_device_id,
+                public_key_fingerprint,
+                interaction_id
+            FROM security_events
+            {where}
+            ORDER BY event_id DESC
+            LIMIT ?
+            """,
+            parameters,
+        ).fetchall()
+        return [dict(row) for row in reversed(rows)]
+    except sqlite3.DatabaseError as exc:
+        raise DatabaseOperationError("Security events could not be read.") from exc
+    finally:
+        connection.close()
+
+
 def create_identity(database_path, user_id):
     """Create a logical identity through the trusted local administration path."""
     validate_identifier(user_id, "user_id")
     connection = _open_existing_database(database_path)
     try:
         connection.execute("BEGIN IMMEDIATE")
+        timestamp = utc_now()
         cursor = connection.execute(
             "INSERT OR IGNORE INTO users (user_id, created_at) VALUES (?, ?)",
-            (user_id, utc_now()),
+            (user_id, timestamp),
         )
+        if cursor.rowcount == 1:
+            _insert_security_event(
+                connection,
+                timestamp,
+                "identity.created",
+                "success",
+                "created",
+                "local_administrator",
+                "trusted_local_account",
+                user_id=user_id,
+            )
         connection.commit()
         return cursor.rowcount == 1
     except sqlite3.DatabaseError as exc:
@@ -1133,8 +1484,20 @@ def issue_enrollment_authorization(
     connection = _open_existing_database(database_path)
     try:
         connection.execute("BEGIN IMMEDIATE")
+        timestamp = utc_now()
         authorization = _issue_enrollment_authorization_in_transaction(
-            connection, user_id, device_id, utc_now(), lifetime_seconds
+            connection, user_id, device_id, timestamp, lifetime_seconds
+        )
+        _insert_security_event(
+            connection,
+            timestamp,
+            "enrollment.authorization_issued",
+            "success",
+            "issued",
+            "local_administrator",
+            "trusted_local_account",
+            user_id=user_id,
+            device_id=device_id,
         )
         connection.commit()
         return authorization
@@ -1175,7 +1538,7 @@ def prepare_authenticator_replacement(
         timestamp = utc_now()
         old_binding = connection.execute(
             """
-            SELECT revoked
+            SELECT revoked, public_key_fingerprint
             FROM devices
             WHERE user_id = ? AND device_id = ?
             """,
@@ -1217,6 +1580,19 @@ def prepare_authenticator_replacement(
             """,
             (user_id, old_device_id),
         )
+        _insert_security_event(
+            connection,
+            timestamp,
+            "authenticator.replacement_prepared",
+            "success",
+            reason,
+            "local_administrator",
+            "trusted_local_account",
+            user_id=user_id,
+            device_id=old_device_id,
+            related_device_id=new_device_id,
+            public_key_fingerprint=old_binding["public_key_fingerprint"],
+        )
         connection.commit()
         authorization.update(
             {
@@ -1248,7 +1624,13 @@ def cancel_enrollment_authorization(database_path, authorization_id):
         timestamp = utc_now()
         authorization = connection.execute(
             """
-            SELECT authorization_id, expires_at, cancelled_at, consumed_at
+            SELECT
+                authorization_id,
+                user_id,
+                device_id,
+                expires_at,
+                cancelled_at,
+                consumed_at
             FROM enrollment_authorizations
             WHERE authorization_id = ?
             """,
@@ -1269,6 +1651,17 @@ def cancel_enrollment_authorization(database_path, authorization_id):
         connection.execute(
             "UPDATE enrollment_authorizations SET cancelled_at = ? WHERE authorization_id = ?",
             (timestamp, authorization_id),
+        )
+        _insert_security_event(
+            connection,
+            timestamp,
+            "enrollment.authorization_cancelled",
+            "success",
+            "cancelled",
+            "local_administrator",
+            "trusted_local_account",
+            user_id=authorization["user_id"],
+            device_id=authorization["device_id"],
         )
         connection.commit()
         return "cancelled"
@@ -1291,7 +1684,7 @@ def bind_authenticator(
     authorization_id,
     authorization_secret,
 ):
-    """Atomically bind an authenticator or reconcile an exact previous binding."""
+    """Bind or reconcile after the caller has verified enrollment proof v1."""
     validate_identifier(user_id, "user_id")
     validate_identifier(device_id, "device_id")
     if not isinstance(authorization_id, str) or not AUTHORIZATION_ID_PATTERN.fullmatch(
@@ -1353,6 +1746,18 @@ def bind_authenticator(
                 raise EnrollmentStateError(
                     "Consumed enrollment authorization does not match its binding."
                 )
+            _insert_security_event(
+                connection,
+                timestamp,
+                "authenticator.binding_reconciled",
+                "success",
+                "revoked" if device["revoked"] else "active",
+                "client",
+                "proof_of_possession_verified",
+                user_id=user_id,
+                device_id=device_id,
+                public_key_fingerprint=public_key_fingerprint,
+            )
             connection.commit()
             return {
                 "outcome": "reconciled",
@@ -1399,6 +1804,18 @@ def bind_authenticator(
             raise EnrollmentStateError(
                 "Enrollment authorization changed during trusted binding."
             )
+        _insert_security_event(
+            connection,
+            timestamp,
+            "authenticator.bound",
+            "success",
+            "created",
+            "client",
+            "proof_of_possession_verified",
+            user_id=user_id,
+            device_id=device_id,
+            public_key_fingerprint=public_key_fingerprint,
+        )
         connection.commit()
         return {
             "outcome": "created",
@@ -1460,14 +1877,38 @@ def issue_authentication_challenge(
         timestamp = utc_now()
         binding = connection.execute(
             """
-            SELECT public_key_fingerprint
+            SELECT user_id, device_id, public_key_fingerprint, revoked
             FROM devices
-            WHERE user_id = ? AND device_id = ? AND revoked = 0
+            WHERE user_id = ? AND device_id = ?
             """,
             (user_id, device_id),
         ).fetchone()
         if binding is None:
-            connection.rollback()
+            _insert_security_event(
+                connection,
+                timestamp,
+                "authentication.denied",
+                "denied",
+                "binding_not_found",
+                "client",
+                "unverified_claim",
+            )
+            connection.commit()
+            return None
+        if binding["revoked"]:
+            _insert_security_event(
+                connection,
+                timestamp,
+                "authentication.denied",
+                "denied",
+                "binding_revoked",
+                "client",
+                "unverified_claim",
+                user_id=binding["user_id"],
+                device_id=binding["device_id"],
+                public_key_fingerprint=binding["public_key_fingerprint"],
+            )
+            connection.commit()
             return None
         _remove_stale_authentication_challenges(connection, timestamp)
         open_challenge_count = connection.execute(
@@ -1481,6 +1922,18 @@ def issue_authentication_challenge(
             (user_id, device_id),
         ).fetchone()[0]
         if open_challenge_count >= MAX_OUTSTANDING_CHALLENGES_PER_BINDING:
+            _insert_security_event(
+                connection,
+                timestamp,
+                "authentication.denied",
+                "denied",
+                "challenge_limit_reached",
+                "client",
+                "unverified_claim",
+                user_id=binding["user_id"],
+                device_id=binding["device_id"],
+                public_key_fingerprint=binding["public_key_fingerprint"],
+            )
             connection.commit()
             return None
         expires_at = _challenge_expiry(timestamp, lifetime_seconds)
@@ -1506,6 +1959,19 @@ def issue_authentication_challenge(
                 timestamp,
                 expires_at,
             ),
+        )
+        _insert_security_event(
+            connection,
+            timestamp,
+            "authentication.challenge_issued",
+            "success",
+            "issued",
+            "client",
+            "unverified_claim",
+            user_id=binding["user_id"],
+            device_id=binding["device_id"],
+            public_key_fingerprint=binding["public_key_fingerprint"],
+            interaction_id=challenge_id,
         )
         connection.commit()
         return {
@@ -1562,7 +2028,7 @@ def get_authentication_challenge(database_path, challenge_id):
 
 
 def consume_authentication_challenge(database_path, challenge_id):
-    """Consume one unexpired v2 challenge only while its binding remains active."""
+    """Consume one challenge after the caller has verified its PKAS-AUTH-V2 proof."""
     validate_challenge_id(challenge_id)
     connection = _open_existing_database(database_path)
     try:
@@ -1570,19 +2036,62 @@ def consume_authentication_challenge(database_path, challenge_id):
         timestamp = utc_now()
         challenge = connection.execute(
             """
-            SELECT expires_at
+            SELECT
+                user_id,
+                device_id,
+                public_key_fingerprint,
+                expires_at,
+                consumed_at
             FROM authentication_challenges
             WHERE challenge_id = ?
             """,
             (challenge_id,),
         ).fetchone()
         if challenge is None:
-            connection.rollback()
+            _insert_security_event(
+                connection,
+                timestamp,
+                "authentication.denied",
+                "denied",
+                "challenge_unavailable",
+                "client",
+                "unverified_claim",
+            )
+            connection.commit()
+            return False
+        if challenge["consumed_at"] is not None:
+            _insert_security_event(
+                connection,
+                timestamp,
+                "authentication.denied",
+                "denied",
+                "challenge_replayed",
+                "client",
+                "unverified_claim",
+                user_id=challenge["user_id"],
+                device_id=challenge["device_id"],
+                public_key_fingerprint=challenge["public_key_fingerprint"],
+                interaction_id=challenge_id,
+            )
+            connection.commit()
             return False
         expires_at = _parse_timestamp(challenge["expires_at"], "challenge expiry")
         current_time = _parse_timestamp(timestamp, "current")
         if expires_at <= current_time:
-            connection.rollback()
+            _insert_security_event(
+                connection,
+                timestamp,
+                "authentication.denied",
+                "denied",
+                "challenge_expired",
+                "client",
+                "unverified_claim",
+                user_id=challenge["user_id"],
+                device_id=challenge["device_id"],
+                public_key_fingerprint=challenge["public_key_fingerprint"],
+                interaction_id=challenge_id,
+            )
+            connection.commit()
             return False
         cursor = connection.execute(
             """
@@ -1601,6 +2110,34 @@ def consume_authentication_challenge(database_path, challenge_id):
             """,
             (timestamp, challenge_id),
         )
+        if cursor.rowcount == 1:
+            _insert_security_event(
+                connection,
+                timestamp,
+                "authentication.succeeded",
+                "success",
+                "proof_verified",
+                "authenticator",
+                "cryptographically_verified",
+                user_id=challenge["user_id"],
+                device_id=challenge["device_id"],
+                public_key_fingerprint=challenge["public_key_fingerprint"],
+                interaction_id=challenge_id,
+            )
+        else:
+            _insert_security_event(
+                connection,
+                timestamp,
+                "authentication.denied",
+                "denied",
+                "binding_inactive",
+                "client",
+                "unverified_claim",
+                user_id=challenge["user_id"],
+                device_id=challenge["device_id"],
+                public_key_fingerprint=challenge["public_key_fingerprint"],
+                interaction_id=challenge_id,
+            )
         connection.commit()
         return cursor.rowcount == 1
     except (EnrollmentStateError, sqlite3.DatabaseError) as exc:
@@ -1620,7 +2157,7 @@ def revoke_authenticator(database_path, user_id, device_id, reason):
         connection.execute("BEGIN IMMEDIATE")
         device = connection.execute(
             """
-            SELECT revoked, revoked_at, revocation_reason
+            SELECT revoked, revoked_at, revocation_reason, public_key_fingerprint
             FROM devices
             WHERE user_id = ? AND device_id = ?
             """,
@@ -1632,6 +2169,7 @@ def revoke_authenticator(database_path, user_id, device_id, reason):
         if device["revoked"]:
             connection.commit()
             return "already_revoked"
+        timestamp = utc_now()
         connection.execute(
             """
             UPDATE devices
@@ -1641,7 +2179,7 @@ def revoke_authenticator(database_path, user_id, device_id, reason):
                 revocation_reason = ?
             WHERE user_id = ? AND device_id = ? AND revoked = 0
             """,
-            (utc_now(), reason, user_id, device_id),
+            (timestamp, reason, user_id, device_id),
         )
         connection.execute(
             """
@@ -1649,6 +2187,18 @@ def revoke_authenticator(database_path, user_id, device_id, reason):
             WHERE user_id = ? AND device_id = ?
             """,
             (user_id, device_id),
+        )
+        _insert_security_event(
+            connection,
+            timestamp,
+            "authenticator.revoked",
+            "success",
+            reason,
+            "local_administrator",
+            "trusted_local_account",
+            user_id=user_id,
+            device_id=device_id,
+            public_key_fingerprint=device["public_key_fingerprint"],
         )
         connection.commit()
         return "revoked"

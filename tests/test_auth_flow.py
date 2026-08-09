@@ -24,6 +24,7 @@ from db_utils import (
     get_device,
     initialize_database,
     issue_enrollment_authorization,
+    list_security_events,
     prepare_authenticator_replacement,
     register_device,
     revoke_authenticator,
@@ -306,7 +307,16 @@ class AuthenticationFlowTests(unittest.TestCase):
         finally:
             connection.close()
 
-        response = self.client.post("/authenticator/bind", json=payload)
+        # The trigger is deliberate failure injection; production schema validation
+        # rejects persisted triggers before normal operations.
+        with patch.object(db_utils, "_reject_unsupported_schema_extensions"):
+            response = self.client.post("/authenticator/bind", json=payload)
+        connection = sqlite3.connect(self._database_path)
+        try:
+            connection.execute("DROP TRIGGER force_grant_consumption_failure")
+            connection.commit()
+        finally:
+            connection.close()
 
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.get_json()["code"], "state_unavailable")
@@ -350,6 +360,18 @@ class AuthenticationFlowTests(unittest.TestCase):
             get_authentication_challenge(self._database_path, challenge["challenge_id"])[
                 "consumed_at"
             ]
+        )
+        challenge_events = [
+            event
+            for event in list_security_events(self._database_path)
+            if event["interaction_id"] == challenge["challenge_id"]
+        ]
+        self.assertEqual(
+            [(event["event_type"], event["reason_code"]) for event in challenge_events],
+            [
+                ("authentication.challenge_issued", "issued"),
+                ("authentication.succeeded", "proof_verified"),
+            ],
         )
 
     def test_invalid_signature_and_replay_are_rejected_and_challenge_is_consumed_once(self):
@@ -455,6 +477,24 @@ class AuthenticationFlowTests(unittest.TestCase):
         )
         self.assertNotEqual(replacement_fingerprint, old_fingerprint)
         self.assertNotEqual(replacement_fingerprint, other_fingerprint)
+        replacement_events = list_security_events(
+            self._database_path,
+            user_id=self.user_id,
+            device_id="old1",
+            event_type="authenticator.replacement_prepared",
+        )
+        self.assertEqual(len(replacement_events), 1)
+        self.assertEqual(replacement_events[0]["device_id"], "old1")
+        self.assertEqual(replacement_events[0]["related_device_id"], "replacement1")
+        self.assertEqual(replacement_events[0]["reason_code"], "suspected_compromise")
+        self.assertEqual(
+            list_security_events(
+                self._database_path,
+                device_id="other1",
+                event_type="authenticator.replacement_prepared",
+            ),
+            [],
+        )
 
     def test_concurrent_verification_allows_one_success(self):
         private_key, _, _, _, _, _ = self._bind()
@@ -473,6 +513,19 @@ class AuthenticationFlowTests(unittest.TestCase):
             get_authentication_challenge(self._database_path, challenge["challenge_id"])[
                 "consumed_at"
             ]
+        )
+        challenge_events = [
+            event
+            for event in list_security_events(self._database_path)
+            if event["interaction_id"] == challenge["challenge_id"]
+        ]
+        self.assertEqual(
+            [(event["event_type"], event["reason_code"]) for event in challenge_events],
+            [
+                ("authentication.challenge_issued", "issued"),
+                ("authentication.succeeded", "proof_verified"),
+                ("authentication.denied", "challenge_replayed"),
+            ],
         )
 
     def test_trusted_revocation_invalidates_challenge_and_blocks_new_authentication(self):
@@ -541,6 +594,21 @@ class AuthenticationFlowTests(unittest.TestCase):
         device = get_device(self._database_path, self.user_id, self.device_id)
         self.assertTrue(device["revoked"])
         self.assertIsNone(device["challenge"])
+        relevant_events = [
+            (event["event_type"], event["reason_code"])
+            for event in list_security_events(
+                self._database_path, user_id=self.user_id, device_id=self.device_id
+            )
+            if event["event_type"]
+            in {"authenticator.revoked", "authentication.denied"}
+        ]
+        self.assertEqual(
+            relevant_events[-2:],
+            [
+                ("authenticator.revoked", "lost"),
+                ("authentication.denied", "binding_revoked"),
+            ],
+        )
 
     def test_revocation_wins_before_blocked_verification_consumption_transition(self):
         private_key, _, _, _, _, _ = self._bind()
@@ -581,6 +649,19 @@ class AuthenticationFlowTests(unittest.TestCase):
         self.assertIsNone(
             get_authentication_challenge(self._database_path, challenge["challenge_id"])
         )
+        relevant_events = [
+            (event["event_type"], event["reason_code"])
+            for event in list_security_events(self._database_path)
+            if event["event_type"]
+            in {"authenticator.revoked", "authentication.denied"}
+        ]
+        self.assertEqual(
+            relevant_events[-2:],
+            [
+                ("authenticator.revoked", "suspected_compromise"),
+                ("authentication.denied", "challenge_unavailable"),
+            ],
+        )
 
     def test_verification_committed_before_revocation_remains_an_earlier_success(self):
         private_key, _, _, _, _, _ = self._bind()
@@ -604,6 +685,19 @@ class AuthenticationFlowTests(unittest.TestCase):
         self.assertIsNone(device["challenge"])
         self.assertIsNone(
             get_authentication_challenge(self._database_path, challenge["challenge_id"])
+        )
+        relevant_events = [
+            (event["event_type"], event["reason_code"])
+            for event in list_security_events(self._database_path)
+            if event["event_type"]
+            in {"authentication.succeeded", "authenticator.revoked"}
+        ]
+        self.assertEqual(
+            relevant_events[-2:],
+            [
+                ("authentication.succeeded", "proof_verified"),
+                ("authenticator.revoked", "lost"),
+            ],
         )
 
     def test_legacy_login_requests_cannot_downgrade_authentication(self):
@@ -731,9 +825,18 @@ class AuthenticationFlowTests(unittest.TestCase):
         finally:
             connection.close()
 
-        response = self.client.post(
-            "/login/verify", json=self._signed_login_payload(private_key, challenge)
-        )
+        # The trigger is deliberate failure injection; production schema validation
+        # rejects persisted triggers before normal operations.
+        with patch.object(db_utils, "_reject_unsupported_schema_extensions"):
+            response = self.client.post(
+                "/login/verify", json=self._signed_login_payload(private_key, challenge)
+            )
+        connection = sqlite3.connect(self._database_path)
+        try:
+            connection.execute("DROP TRIGGER force_challenge_consumption_failure")
+            connection.commit()
+        finally:
+            connection.close()
 
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.get_json()["code"], "state_unavailable")

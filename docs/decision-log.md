@@ -243,3 +243,29 @@ identity proofing, key restoration, backup, or passphrase reset. No new schema
 or replacement-link field is introduced because the existing immutable bindings,
 terminal revocation state, and trusted command output establish the required
 bounded operation without a recovery framework.
+
+## 2026-08-09 — Keep security evidence with authoritative local state
+
+**Decision:** Schema v4 adds one fixed-field `security_events` table to the
+existing SQLite database. Important successful identity, enrollment,
+authentication, revocation, and replacement transitions insert sanitized evidence
+inside the same explicit transaction as authoritative state. Selected protocol,
+enrollment, replay, expiry, signature, binding, and challenge-limit denials are
+separate observational events with claimed-versus-verified actor assurance.
+
+The trusted-local `manage.py events` command provides bounded JSON inspection.
+Events exclude bearer authorization values, credential/private-key material,
+passphrases, raw signatures, public-key encodings, and challenge nonces. Migration
+records only that migration occurred and does not manufacture historical events.
+Unverified request values are not copied into event context unless they resolve
+to trusted binding or challenge state. Canonical v4 validation requires the
+application indexes, rejects persisted triggers/views, and verifies that an
+inserted event row remains present and unchanged before its transaction commits.
+
+**Consequences:** SQLite evidence and lifecycle state cannot disagree because of a
+process failure between two separate commits. The event history still shares the
+same trusted OS/database boundary and is not tamper-proof, independently
+attributable, or an enterprise audit system. M5 adds no retention automation,
+detections, alerts, severity framework, event shipping, dashboards, or SIEM
+integration. M6 is conditional on whether this real event model supports a small,
+identity-specific investigation/detection milestone with proportional value.

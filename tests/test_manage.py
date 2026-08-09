@@ -44,7 +44,7 @@ class ManageCliTests(unittest.TestCase):
         self.assertEqual(migrate_status["status"], "already_current")
         self.assertEqual(ready_exit, 0)
         self.assertEqual(ready_status["status"], "ready")
-        self.assertEqual(ready_status["schema_version"], 3)
+        self.assertEqual(ready_status["schema_version"], 4)
         self.assertEqual(ready_status["integrity"], "ok")
 
     def test_lifecycle_commands_use_sanitized_local_administration(self):
@@ -56,6 +56,7 @@ class ManageCliTests(unittest.TestCase):
             "enrollment-cancel", authorization["authorization_id"]
         )
         inventory_exit, inventory = self._run("inventory", "--user-id", "student1")
+        events_exit, evidence = self._run("events", "--user-id", "student1")
 
         self.assertEqual(create_exit, 0)
         self.assertEqual(create_result["status"], "created")
@@ -68,6 +69,17 @@ class ManageCliTests(unittest.TestCase):
         self.assertEqual(inventory_exit, 0)
         self.assertEqual(inventory["identities"][0]["authenticators"], [])
         self.assertNotIn("authorization_secret", json.dumps(inventory))
+        self.assertEqual(events_exit, 0)
+        self.assertEqual(
+            [event["event_type"] for event in evidence["events"]],
+            [
+                "identity.created",
+                "enrollment.authorization_issued",
+                "enrollment.authorization_cancelled",
+            ],
+        )
+        self.assertNotIn(authorization["authorization_id"], json.dumps(evidence))
+        self.assertNotIn(authorization["authorization_secret"], json.dumps(evidence))
 
     def test_revoke_preserves_first_reason_and_warns_for_last_active_binding(self):
         self._run("init")
