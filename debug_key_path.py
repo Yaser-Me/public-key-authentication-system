@@ -1,3 +1,7 @@
-from client import _device_key_paths
+"""Print the nonsecret current and pending credential locations for a scope."""
 
-print(_device_key_paths("student2_test", "pc2_test"))
+from credential_store import credential_paths
+
+
+if __name__ == "__main__":
+    print(credential_paths("student2_test", "pc2_test"))

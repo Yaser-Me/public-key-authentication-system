@@ -8,6 +8,10 @@ database.json
 *.sqlite3-journal
 aeskey_*.bin
 privkey_*.enc
+*.credential.json
+*.pending.json
+.*.credential.json.*.tmp
+.*.pending.json.*.tmp
 
 .env
 .vscode/

@@ -32,6 +32,7 @@ from db_utils import (
     migrate_database,
     register_device,
     revoke_authenticator,
+    run_if_binding_active,
 )
 
 
@@ -1091,6 +1092,46 @@ class DatabaseTests(unittest.TestCase):
 
         self.assertEqual(sorted(results), [False, True])
         self.assertIsNone(get_device(self.database_path, "student1", "laptop1")["challenge"])
+
+    def test_active_binding_claim_window_orders_claim_before_revocation(self):
+        self._create_identity()
+        public_key_b64, fingerprint = self._public_key_values()
+        register_device(self.database_path, "student1", "laptop1", public_key_b64, fingerprint)
+        claim_started = threading.Event()
+        release_claim = threading.Event()
+        outcome = {}
+
+        def claim():
+            claim_started.set()
+            self.assertTrue(release_claim.wait(5))
+            return "claimed"
+
+        def run_claim():
+            outcome["claim"] = run_if_binding_active(
+                self.database_path, "student1", "laptop1", fingerprint, claim
+            )
+
+        def revoke():
+            outcome["revoke"] = revoke_authenticator(
+                self.database_path, "student1", "laptop1", "suspected_compromise"
+            )
+
+        claim_thread = threading.Thread(target=run_claim)
+        claim_thread.start()
+        self.assertTrue(claim_started.wait(5))
+        revoke_thread = threading.Thread(target=revoke)
+        revoke_thread.start()
+        release_claim.set()
+        claim_thread.join(10)
+        revoke_thread.join(10)
+
+        self.assertEqual(outcome["claim"], "claimed")
+        self.assertEqual(outcome["revoke"], "revoked")
+        self.assertFalse(
+            run_if_binding_active(
+                self.database_path, "student1", "laptop1", fingerprint, lambda: True
+            )
+        )
 
 
 if __name__ == "__main__":
