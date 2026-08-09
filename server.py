@@ -17,6 +17,7 @@ from db_utils import (
     get_database_status,
     get_default_database_path,
     issue_authentication_challenge,
+    record_security_observation,
     validate_challenge_id,
     validate_identifier as validate_state_identifier,
 )
@@ -215,6 +216,11 @@ def bind_authenticator_route():
         device_id,
         fingerprint,
     ):
+        record_security_observation(
+            _database_path(),
+            "enrollment.denied",
+            "invalid_proof",
+        )
         return _error("Enrollment denied.", "enrollment_denied", 403)
 
     try:
@@ -228,6 +234,11 @@ def bind_authenticator_route():
             authorization_secret,
         )
     except EnrollmentDeniedError:
+        record_security_observation(
+            _database_path(),
+            "enrollment.denied",
+            "authorization_denied",
+        )
         return _error("Enrollment denied.", "enrollment_denied", 403)
 
     return jsonify(
@@ -255,6 +266,12 @@ def request_challenge():
         user_id = _validate_identifier(data["user_id"], "user_id")
         device_id = _validate_identifier(data["device_id"], "device_id")
     except RequestValidationError as exc:
+        if exc.code == "unsupported_authentication_protocol":
+            record_security_observation(
+                _database_path(),
+                "authentication.protocol_rejected",
+                "unsupported_protocol",
+            )
         return _error(str(exc), exc.code, 400)
 
     challenge = issue_authentication_challenge(
@@ -292,10 +309,22 @@ def verify_login():
             max_encoded_length=MAX_SIGNATURE_B64_LENGTH,
         )
     except RequestValidationError as exc:
+        if exc.code == "unsupported_authentication_protocol":
+            record_security_observation(
+                _database_path(),
+                "authentication.protocol_rejected",
+                "unsupported_protocol",
+            )
         return _error(str(exc), exc.code, 400)
 
     challenge = get_authentication_challenge(_database_path(), challenge_id)
     if challenge is None:
+        record_security_observation(
+            _database_path(),
+            "authentication.denied",
+            "challenge_unavailable",
+            challenge_id=challenge_id,
+        )
         return _error("Authentication denied.", "authentication_denied", 403)
     try:
         nonce = _validate_base64(
@@ -326,6 +355,12 @@ def verify_login():
         challenge["device_id"],
         challenge["public_key_fingerprint"],
     ):
+        record_security_observation(
+            _database_path(),
+            "authentication.denied",
+            "invalid_signature",
+            challenge_id=challenge_id,
+        )
         return _error("Authentication denied.", "authentication_denied", 403)
 
     if not consume_authentication_challenge(_database_path(), challenge_id):

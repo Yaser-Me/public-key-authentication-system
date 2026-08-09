@@ -18,7 +18,7 @@ When this file conflicts with an approved phase instruction, the approved phase 
 
 ### Portfolio-facing project title
 
-**Passwordless Identity Security and Detection Lab**
+**Passwordless Identity Security Lab**
 
 The GitHub repository name may remain unchanged. The portfolio-facing title should be introduced only when the implementation and documentation genuinely support it.
 
@@ -27,7 +27,10 @@ The GitHub repository name may remain unchanged. The portfolio-facing title shou
 This repository is intended to become a strong, compact cybersecurity artifact
 that stands on its own product and evidence needs.
 
-It is intended to become a focused, reproducible identity-security project demonstrating secure authentication, device lifecycle controls, security telemetry, detection logic, incident investigation, containment, validation, testing, and technical communication.
+It is a focused, reproducible identity-security project demonstrating secure
+authentication, authenticator lifecycle controls, trustworthy security evidence,
+validation, testing, and technical communication. A later small detection or
+investigation capability is conditional on the real event model adding genuine value.
 
 It must not falsely present itself as enterprise IAM infrastructure. Decisions
 for this repository must not be limited by the existence or scope of another
@@ -92,9 +95,14 @@ Therefore:
 
 ## 4. Project mission
 
+The primary portfolio skills for this repository are Identity Security/IAM and
+Secure Software Development/Security Engineering. Monitoring, investigation, and
+any later detection work support those skills; they are not separate product goals.
+
 Upgrade the current academic passwordless-authentication demonstration into a reproducible identity-security lab that proves the following professional workflow:
 
-> identity action → security-relevant telemetry → suspicious behavior → detection → investigation → containment → recovery validation → documented evidence
+> identity lifecycle action → trustworthy application evidence → reproducible
+> security validation → optional bounded investigation/detection where justified
 
 The final project should demonstrate that the user can:
 
@@ -103,8 +111,8 @@ The final project should demonstrate that the user can:
 - design and validate safer controls;
 - generate structured, privacy-conscious identity events;
 - reproduce normal and abusive behavior safely;
-- create and test detection logic;
-- investigate an event sequence using evidence;
+- determine whether a small identity-specific detection is justified by real events;
+- reconstruct an event sequence from evidence where the implemented model supports it;
 - apply containment and verify that it worked;
 - explain false positives, limitations, and production differences;
 - maintain automated tests and CI;
@@ -118,8 +126,8 @@ The final project should demonstrate that the user can:
 |---|---|---|
 | Identity and access management | Device enrollment, authentication, revocation, actor authorization, lifecycle state, least privilege | Implemented controls, automated security tests, diagrams, decision records |
 | Security monitoring | Important authentication and administrative decisions produce structured events | Stable event schema, sanitized event samples, schema tests |
-| Detection engineering | Suspicious identity behavior is converted into explicit, testable detection logic | Detection hypothesis, thresholds, positive tests, negative tests, false-positive notes |
-| Incident investigation | An analyst can reconstruct who did what, when, to which user/device/challenge, and with what outcome | Evidence-linked timeline, triage checklist, investigation report |
+| Detection engineering (conditional) | A small number of identity-specific behaviors may become explicit, testable logic if M5 evidence supports them | Detection hypothesis, positive and negative tests, false-positive notes |
+| Incident investigation (conditional) | A local analyst may reconstruct supported facts from actual identity events | Evidence-linked timeline that separates verified facts from inference |
 | Response and remediation | A compromised or abusive device can be contained and secure state restored | Revocation, challenge invalidation, rate-limit or access-control evidence, recovery tests |
 | Secure development | Security behavior remains correct across changes | Unit, integration, security, and regression tests; CI; reviewed dependencies |
 | Technical reporting | A reviewer can understand the risk, design, evidence, limits, and result | README, threat model, incident report, executive summary, limitations |
@@ -146,9 +154,10 @@ The lab safely reproduces identity-security events such as:
 
 The system generates structured audit events for these actions.
 
-Detection rules identify suspicious behavior. An analyst reconstructs the timeline, determines scope and confidence, contains the affected device or administrative access, and validates that the prohibited action can no longer succeed.
-
-The project must show the entire evidence chain. It must not stop at "login succeeded," "attack failed," or "an alert was generated."
+M5 records a bounded set of these identity outcomes as structured application
+evidence. After M5, the project must decide whether 2-4 deterministic,
+identity-specific behaviors justify a small M6. Detection, alerting, and a full SOC
+workflow are not required outcomes for this supporting repository.
 
 ---
 
@@ -166,7 +175,7 @@ Codex should prioritize work that lets the user truthfully explain:
 - why local encrypted key files are not equivalent to hardware-backed protection;
 - how authorization differs from authentication.
 
-### Detection and monitoring
+### Application evidence and conditional detection
 
 - which event fields are needed to reconstruct an authentication timeline;
 - how to distinguish one failure from a suspicious burst;
@@ -251,8 +260,8 @@ When choosing between possible changes, use this order:
 2. fix security-critical identity lifecycle weaknesses;
 3. produce trustworthy structured telemetry;
 4. create deterministic attack and normal-flow simulations;
-5. build tested detections;
-6. support evidence-based investigation and response;
+5. assess whether bounded identity-specific detection/investigation adds value;
+6. implement it only if that assessment is positive;
 7. strengthen automated testing and CI;
 8. package the work for technical review and interviews;
 9. add optional polish only after the security workflow is complete.
@@ -274,8 +283,7 @@ One complete and defensible security workflow is more valuable than many shallow
 - controlled persistence;
 - structured JSON identity telemetry;
 - safe attack simulation;
-- local deterministic detection testing;
-- investigation and response documentation;
+- optional local deterministic detection/investigation after a positive scope gate;
 - automated tests;
 - automated CI validation;
 - public-safe documentation and evidence.
@@ -364,8 +372,8 @@ The long-term upgrade is complete only when:
 - persistence and challenge consumption preserve integrity;
 - important decisions produce structured events;
 - attack simulations are repeatable;
-- detections pass positive and negative validation;
-- an incident can be reconstructed from evidence;
+- any later detections or investigation claims, if implemented, pass proportionate
+  positive and negative validation;
 - containment and recovery are verified;
 - CI passes;
 - public evidence is sanitized;

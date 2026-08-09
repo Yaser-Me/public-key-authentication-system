@@ -2,9 +2,10 @@
 
 ## Project scope
 
-This repository is evolving from an academic passwordless-authentication demo
-into an identity security and detection lab. Work must follow the approved
-project phase and the decisions recorded in `docs/decision-log.md`.
+This repository has evolved from an academic passwordless-authentication demo
+into a local identity-security and secure-engineering lab. Application evidence
+supports that core; any later detection work is conditional and bounded. Work must
+follow the approved project phase and `docs/decision-log.md`.
 
 ## Strategic context
 
@@ -90,42 +91,45 @@ project phase and the decisions recorded in `docs/decision-log.md`.
 - Do not pull authorized lifecycle, passphrase/OS key storage, challenge expiry,
   rate limiting, telemetry, detection, or incident response into this milestone.
 
-## Administrator-controlled lifecycle milestone
+## Completed M1-M4 authenticator lifecycle
 
-- Use the approved Milestone 1 execution plan for explicit v1-to-v2 migration,
-  local identity creation, scoped enrollment authorization, RSA-PSS proof of
-  possession, sanitized inventory, and terminal reasoned revocation.
-- Keep lifecycle authority in the trusted local administrative CLI. Untrusted HTTP
-  clients must not create identities, bind without authorization and proof, or
-  revoke authenticators.
-- Preserve the existing login challenge-response protocol in this milestone; its
-  RSA-PSS/context redesign, challenge expiry, rate limiting, key-custody redesign,
-  telemetry, detection, investigation, recovery orchestration, sessions, and RBAC
-  remain later work.
-- Use direct SQLite transactions and focused functions. Do not add a migration
-  framework, token framework, ORM, service/repository layer, or application locks.
-- After an enrollment request is sent, keep complete local key material unless the
-  operator explicitly cleans it up after inventory review. Exact retries must not
-  create new trusted state.
+- Treat administrator-controlled enrollment/revocation, Credential-v1 custody,
+  PKAS-AUTH-V2, and bounded revoke-first replacement as settled behavior.
+- Lifecycle authority remains the trusted local OS account through the local CLI.
+  HTTP clients cannot create identities, bind without scoped authorization and
+  proof of possession, or revoke authenticators.
+- New software keys use the fixed-profile Argon2id/AES-GCM Credential-v1 envelope.
+  Current credential paths are no-overwrite, unlock precedes challenge issuance,
+  and uncertain enrollment retries preserve and reuse the same key.
+- Authentication uses versioned, context-bound RSA-PSS proofs and independent,
+  expiring, single-use challenges. Revocation is terminal and invalidates open
+  challenges; replacement creates a distinct binding and key without reactivation.
+- This is logical software-authenticator lifecycle state, not physical-device
+  identity, hardware attestation, human identity proofing, or generic recovery.
 
-## Passphrase-protected client credential milestone
+## Current M5 security-evidence milestone
 
-- Store new software private keys only in the supported credential-v1 envelope:
-  fixed-profile Argon2id plus AES-GCM around DER PKCS#8, with authenticated
-  identity, binding, and fingerprint metadata. Do not reintroduce adjacent raw
-  AES-key storage or a weaker fallback.
-- Keep credential parsing bounded and closed. Existing credential destinations
-  must never be replaced; use complete validation before no-overwrite publication.
-- Unlock locally before requesting a login challenge. Preserve a complete current
-  credential after any enrollment request may have reached the server, and retry
-  with the same key.
-- Legacy AES/ciphertext files are migration-only. Require an exact trusted binding
-  match before initial migration, claim CURRENT before deleting legacy material,
-  and block routine use while pending cleanup exists. Do not silently fall back to
-  legacy storage.
-- Keep this client work local and CLI-first. Do not pull login-protocol hardening,
-  replacement/recovery orchestration, telemetry, detection, sessions, or key-store
-  integrations into this milestone.
+- Add only application-native evidence that materially explains identity lifecycle
+  and authentication decisions. Identity Security/IAM and Secure Software
+  Development/Security Engineering remain the primary portfolio skills.
+- Prefer state mutation and its authoritative success event in the same SQLite
+  transaction. Keep observational denials truthful about claimed versus verified
+  actors, and fail closed on trusted-state failures.
+- Exclude passphrases, bearer secrets, private keys, raw signatures, credential
+  material, and unnecessary challenge nonce data. Local SQLite evidence shares the
+  application's trusted-OS/database boundary and is not tamper-proof or independent.
+- Keep inspection local, bounded, structured, and CLI-first. Do not add detections,
+  alerts, dashboards, log shipping, event buses, severity frameworks, or SIEM/SOC
+  infrastructure during M5.
+- M6 is conditional. After M5, inspect the real event model and proceed only if a
+  substantially smaller set of identity-specific detections/investigation views adds
+  genuine value; KQL, SPL, dashboards, and generic SOC workflows are not commitments.
+
+## Milestone process
+
+- Normally use repository inspection, focused research, one short manager/checkpoint,
+  implementation, verification, and independent review for security-sensitive work.
+  Do not create chains of revised plans unless a real architecture conflict requires it.
 
 ## Required checks
 

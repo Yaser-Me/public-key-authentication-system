@@ -13,6 +13,7 @@ from db_utils import (
     initialize_database,
     issue_enrollment_authorization,
     list_authenticator_inventory,
+    list_security_events,
     migrate_database,
     prepare_authenticator_replacement,
     revoke_authenticator,
@@ -35,7 +36,7 @@ def build_parser():
     subparsers.add_parser("init", help="Initialize local state without replacing it.")
     subparsers.add_parser("status", help="Show local state readiness and counts.")
     subparsers.add_parser(
-        "migrate", help="Explicitly migrate supported v1 or v2 state to v3."
+        "migrate", help="Explicitly migrate supported v1, v2, or v3 state to v4."
     )
 
     identity_add = subparsers.add_parser(
@@ -60,6 +61,14 @@ def build_parser():
     )
     inventory.add_argument("--user-id")
     inventory.add_argument("--fingerprint")
+
+    events = subparsers.add_parser(
+        "events", help="Show bounded structured security evidence in chronological order."
+    )
+    events.add_argument("--user-id")
+    events.add_argument("--device-id")
+    events.add_argument("--event-type")
+    events.add_argument("--limit", type=int, default=100)
 
     revoke = subparsers.add_parser(
         "revoke", help="Terminally revoke an authenticator and invalidate its challenges."
@@ -176,6 +185,17 @@ def main(argv=None):
                 fingerprint=args.fingerprint,
             )
             print(json.dumps({"identities": result}, indent=2, sort_keys=True))
+            return 0
+
+        if args.command == "events":
+            result = list_security_events(
+                database_path,
+                user_id=args.user_id,
+                device_id=args.device_id,
+                event_type=args.event_type,
+                limit=args.limit,
+            )
+            print(json.dumps({"events": result}, indent=2, sort_keys=True))
             return 0
 
         if args.command == "revoke":

@@ -6,8 +6,9 @@ challenge, and the Flask API verifies the signature with the stored public key.
 
 The current implementation combines an administrator-controlled local
 authenticator lifecycle, passphrase-protected software credentials, and a
-versioned authentication challenge-response protocol. It is a local lab, not
-enterprise IAM or a production authentication service.
+versioned authentication challenge-response protocol, and application-native
+security evidence. It is a local lab, not enterprise IAM, a SIEM, or a production
+authentication service.
 
 ## Authentication flow
 
@@ -36,9 +37,9 @@ access to another protected application.
 - Authenticated local identity, binding, and fingerprint association for credentials
 - No-overwrite credential publication using complete temporary validation and hard links
 - Server-validated RSA public keys and SHA-256 fingerprints
-- Explicit SQLite initialization, status, and v1/v2-to-v3 migration commands
+- Explicit SQLite initialization, status, and v1/v2/v3-to-v4 migration commands
 - SQLite integrity plus conservative recognition of the application-generated
-  v1/v2/v3 lifecycle schemas on every state open
+  v1/v2/v3/v4 lifecycle schemas on every state open
 - Trusted-local identity creation, inventory, enrollment authorization, and
   reasoned revocation commands
 - High-entropy, digest-stored, scoped, short-lived, single-use enrollment
@@ -51,6 +52,9 @@ access to another protected application.
 - Duplicate device and public-key rejection
 - Strict JSON, identifier, Base64, public-key, and request-size validation
 - Successful challenge replay protection, including concurrent database updates
+- Structured, sanitized lifecycle and authentication events committed with
+  authoritative state transitions where applicable
+- Bounded local JSON event inspection by identity, binding, or event type
 - Flask JSON API
 - Tkinter desktop client
 - Isolated automated positive, negative, concurrency, and rollback tests
@@ -69,6 +73,7 @@ access to another protected application.
 | `tests/` | Automated unit, route, client, persistence, and CLI tests |
 | `replay_test.py` | Legacy manual replay helper; not reproducible evidence |
 | `docs/administrator-controlled-lifecycle.md` | Milestone security model and evidence |
+| `docs/application-native-security-evidence.md` | Security-event semantics, trust boundary, and evidence |
 | `requirements.txt` | Python dependencies |
 
 ## Run locally
@@ -88,7 +93,7 @@ python manage.py init
 python manage.py status
 ```
 
-For supported existing v1 or v2 SQLite state, stop the local service, make a
+For supported existing v1, v2, or v3 SQLite state, stop the local service, make a
 manual copy if desired, then run:
 
 ```powershell
@@ -160,11 +165,13 @@ python manage.py --database C:\path\to\identity_lab.sqlite3 migrate
 
 `init` is idempotent for a valid current schema. It refuses to replace corrupt,
 unreadable, unsupported, or migration-required state. Only `migrate` is allowed
-to interpret supported v1 or v2 state. There is intentionally no reset command yet.
+to interpret supported v1, v2, or v3 state. There is intentionally no reset command yet.
 Supported means a canonical schema produced by this application's recognized
-v1, v2, or v3 creation path. Manually rewritten or third-party schemas fail closed,
+v1, v2, v3, or v4 creation path. Manually rewritten or third-party schemas fail closed,
 even if they appear semantically equivalent, because the lifecycle constraints
-cannot safely be inferred from column names or a few sample inserts.
+cannot safely be inferred from column names or a few sample inserts. Validation
+also requires the application-owned indexes and rejects persisted triggers or
+views that could change lifecycle or evidence behavior.
 If the repository contains a legacy `database.json`, default initialization
 stops without modifying it so the operator cannot silently abandon old state.
 Passing `--database` or setting `PKAS_DATABASE_PATH` is treated as an explicit
@@ -179,6 +186,7 @@ python manage.py enrollment-cancel AUTHORIZATION_ID
 python manage.py inventory --user-id student1
 python manage.py revoke student1 laptop1 suspected_compromise
 python manage.py replacement-prepare student1 old-laptop replacement-laptop suspected_compromise
+python manage.py events --user-id student1 --limit 100
 ```
 
 `enrollment-issue` displays the authorization ID and bearer secret once. Do not
@@ -197,6 +205,12 @@ proofing. If the administrator loses the displayed authorization secret after
 preparation, the old binding remains safely revoked. Inspect inventory, then
 use the explicit `enrollment-issue` command for the still-absent replacement
 label rather than trying to prepare the old binding again.
+
+`events` emits structured JSON in chronological order for the newest bounded
+selection. It can filter by logical identity, binding (including a replacement's
+related binding), or exact event type. The event table never stores enrollment
+bearer values, private-key material, passphrases, raw signatures, or challenge
+nonces.
 
 ## API endpoints
 
@@ -269,8 +283,16 @@ production authentication service.
   boundary. Mutually untrusted local OS users are outside scope.
 - A successful result proves possession of the stored software private key. It
   does not prove a real-world identity, a physical device, or create a login session.
-- There is no structured security telemetry, detection, alert, investigation,
-  containment, or recovery workflow yet.
+- Security events share the application's SQLite and trusted local OS boundary.
+  They are not tamper-proof, immutable, independently attributable, or a substitute
+  for centralized audit logging. Storage retention is not automated, although CLI
+  reads are bounded; a high volume of local requests can grow the event table.
+- Trusted-state/database failures still return `state_unavailable`, but the same
+  failing database cannot be relied on to preserve evidence of its own failure.
+  Client-local passphrase failures and lost responses are not server-observable and
+  are deliberately absent from server evidence.
+- There are no detections, alerts, generic investigation workflow, event shipping,
+  or SIEM integration. Any later M6 remains conditional on the real M5 event model.
 - Existing `database.json` files are not imported automatically. Initialization
   never silently replaces them or any unreadable SQLite state.
 
