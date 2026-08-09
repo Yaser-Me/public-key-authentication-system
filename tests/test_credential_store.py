@@ -165,7 +165,19 @@ class CredentialStoreTests(unittest.TestCase):
         path = self.root / "race.credential"
         barrier = threading.Barrier(2)
         original_link = credential_store.os.link
+        original_argon2id = credential_store.Argon2id
         errors = []
+        kdf_lock = threading.Lock()
+
+        class SerializedArgon2id:
+            def __init__(self, *args, **kwargs):
+                self._argon2id = original_argon2id(*args, **kwargs)
+
+            def derive(self, passphrase):
+                # This test measures hard-link publication concurrency. Keep the
+                # real KDF but avoid exhausting constrained CI runners first.
+                with kdf_lock:
+                    return self._argon2id.derive(passphrase)
 
         def link_with_barrier(source, destination):
             barrier.wait(timeout=5)
@@ -177,7 +189,9 @@ class CredentialStoreTests(unittest.TestCase):
             except CredentialError as exc:
                 errors.append(exc.code)
 
-        with patch.object(credential_store.os, "link", side_effect=link_with_barrier):
+        with patch.object(credential_store, "Argon2id", SerializedArgon2id), patch.object(
+            credential_store.os, "link", side_effect=link_with_barrier
+        ):
             first = threading.Thread(target=publish, args=(first_bytes,))
             second = threading.Thread(target=publish, args=(second_bytes,))
             first.start()
