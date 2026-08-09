@@ -17,11 +17,15 @@ DEFAULT_ENROLLMENT_LIFETIME_SECONDS = 10 * 60
 DEFAULT_CHALLENGE_LIFETIME_SECONDS = 5 * 60
 MAX_OUTSTANDING_CHALLENGES_PER_BINDING = 8
 MAX_SECURITY_EVENT_QUERY_LIMIT = 1000
+DEFAULT_SECURITY_ANALYSIS_LIMIT = 100
+INVALID_SIGNATURE_FINDING_THRESHOLD = 3
+INVALID_SIGNATURE_FINDING_WINDOW_SECONDS = 10 * 60
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 AUTHORIZATION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 CHALLENGE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{43}$")
 EVENT_TYPE_PATTERN = re.compile(r"^[a-z][a-z0-9_.]{0,63}$")
 REASON_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
+FINGERPRINT_PATTERN = re.compile(r"^SHA256:[A-Za-z0-9+/]{43}$")
 REVOCATION_REASONS = {
     "lost",
     "suspected_compromise",
@@ -1072,6 +1076,383 @@ def list_security_events(
         return [dict(row) for row in reversed(rows)]
     except sqlite3.DatabaseError as exc:
         raise DatabaseOperationError("Security events could not be read.") from exc
+    finally:
+        connection.close()
+
+
+def _validate_analysis_event(event):
+    """Validate selected evidence before using it for security interpretation."""
+    if not isinstance(event["event_id"], int) or event["event_id"] <= 0:
+        raise DatabaseOperationError("Security evidence could not be analyzed safely.")
+    if not isinstance(event["occurred_at"], str) or len(event["occurred_at"]) > 64:
+        raise DatabaseOperationError("Security evidence could not be analyzed safely.")
+    try:
+        occurred_at = _parse_timestamp(event["occurred_at"], "event")
+    except EnrollmentStateError as exc:
+        raise DatabaseOperationError(
+            "Security evidence could not be analyzed safely."
+        ) from exc
+
+    token_fields = {
+        "event_type": EVENT_TYPE_PATTERN,
+        "outcome": REASON_CODE_PATTERN,
+        "reason_code": REASON_CODE_PATTERN,
+        "actor_kind": REASON_CODE_PATTERN,
+        "actor_assurance": REASON_CODE_PATTERN,
+    }
+    for field_name, pattern in token_fields.items():
+        value = event[field_name]
+        if not isinstance(value, str) or not pattern.fullmatch(value):
+            raise DatabaseOperationError(
+                "Security evidence could not be analyzed safely."
+            )
+
+    for field_name in ("user_id", "device_id", "related_device_id"):
+        value = event[field_name]
+        if value is not None:
+            try:
+                validate_identifier(value, field_name)
+            except ValueError as exc:
+                raise DatabaseOperationError(
+                    "Security evidence could not be analyzed safely."
+                ) from exc
+
+    fingerprint = event["public_key_fingerprint"]
+    if fingerprint is not None and (
+        not isinstance(fingerprint, str)
+        or not FINGERPRINT_PATTERN.fullmatch(fingerprint)
+    ):
+        raise DatabaseOperationError("Security evidence could not be analyzed safely.")
+
+    interaction_id = event["interaction_id"]
+    if interaction_id is not None:
+        try:
+            validate_challenge_id(interaction_id)
+        except ValueError as exc:
+            raise DatabaseOperationError(
+                "Security evidence could not be analyzed safely."
+            ) from exc
+
+    if event["event_type"] == "authenticator.replacement_prepared":
+        if (
+            event["related_device_id"] is None
+            or event["related_device_id"] == event["device_id"]
+        ):
+            raise DatabaseOperationError(
+                "Security evidence could not be analyzed safely."
+            )
+    elif event["related_device_id"] is not None:
+        raise DatabaseOperationError("Security evidence could not be analyzed safely.")
+
+    required_context = (
+        event["user_id"],
+        event["device_id"],
+        event["public_key_fingerprint"],
+    )
+    event_key = (event["event_type"], event["reason_code"])
+    exact_semantics = {
+        ("authentication.denied", "invalid_signature"): (
+            "denied",
+            "client",
+            "unverified_claim",
+            True,
+        ),
+        ("authentication.denied", "challenge_replayed"): (
+            "denied",
+            "client",
+            "unverified_claim",
+            True,
+        ),
+        ("authentication.succeeded", "proof_verified"): (
+            "success",
+            "authenticator",
+            "cryptographically_verified",
+            True,
+        ),
+        ("authentication.denied", "binding_revoked"): (
+            "denied",
+            "client",
+            "unverified_claim",
+            False,
+        ),
+    }
+    expected = exact_semantics.get(event_key)
+    if event["event_type"] in {
+        "authenticator.revoked",
+        "authenticator.replacement_prepared",
+    }:
+        expected = (
+            "success",
+            "local_administrator",
+            "trusted_local_account",
+            False,
+        )
+    if expected is not None:
+        outcome, actor_kind, actor_assurance, needs_interaction = expected
+        inconsistent = (
+            event["outcome"] != outcome
+            or event["actor_kind"] != actor_kind
+            or event["actor_assurance"] != actor_assurance
+            or any(value is None for value in required_context)
+            or (needs_interaction and interaction_id is None)
+            or (not needs_interaction and interaction_id is not None)
+        )
+        if event["event_type"].startswith("authenticator."):
+            inconsistent = inconsistent or event["reason_code"] not in REVOCATION_REASONS
+        if inconsistent:
+            raise DatabaseOperationError(
+                "Security evidence could not be analyzed safely."
+            )
+    return occurred_at
+
+
+def _binding_context(event):
+    return (
+        event["user_id"],
+        event["device_id"],
+        event["public_key_fingerprint"],
+    )
+
+
+def _invalid_signature_findings(analyzed_events):
+    grouped = {}
+    for event, occurred_at in analyzed_events:
+        if (
+            event["event_type"] == "authentication.denied"
+            and event["reason_code"] == "invalid_signature"
+        ):
+            grouped.setdefault(_binding_context(event), []).append(
+                (event, occurred_at)
+            )
+
+    findings = []
+    window = timedelta(seconds=INVALID_SIGNATURE_FINDING_WINDOW_SECONDS)
+    for context, attempts in grouped.items():
+        attempts.sort(key=lambda item: (item[1], item[0]["event_id"]))
+        latest_evidence = None
+        for right_index, (_, right_time) in enumerate(attempts):
+            candidates = {}
+            for event, occurred_at in attempts[: right_index + 1]:
+                if right_time - occurred_at <= window:
+                    candidates[event["interaction_id"]] = (event, occurred_at)
+            if len(candidates) >= INVALID_SIGNATURE_FINDING_THRESHOLD:
+                selected = sorted(
+                    candidates.values(),
+                    key=lambda item: (item[1], item[0]["event_id"]),
+                )[-INVALID_SIGNATURE_FINDING_THRESHOLD:]
+                latest_evidence = sorted(event["event_id"] for event, _ in selected)
+        if latest_evidence is None:
+            continue
+        user_id, device_id, fingerprint = context
+        findings.append(
+            {
+                "finding_type": "repeated_invalid_authentication_proofs",
+                "user_id": user_id,
+                "device_id": device_id,
+                "public_key_fingerprint": fingerprint,
+                "evidence_event_ids": latest_evidence,
+                "fact": (
+                    "Three distinct authentication challenge interactions for this "
+                    "binding produced invalid-signature denials within "
+                    f"{INVALID_SIGNATURE_FINDING_WINDOW_SECONDS} seconds."
+                ),
+                "interpretation": (
+                    "This can indicate a stale or mismatched credential, or repeated "
+                    "attempts without the matching private key."
+                ),
+                "limitation": (
+                    "The requests were not cryptographically attributed to a person, "
+                    "physical device, or attacker."
+                ),
+            }
+        )
+    return findings
+
+
+def _replay_findings(analyzed_events):
+    successful_interactions = {}
+    replay_events = {}
+    for event, _ in analyzed_events:
+        interaction_id = event["interaction_id"]
+        context = _binding_context(event)
+        key = (interaction_id, context)
+        if (
+            event["event_type"] == "authentication.succeeded"
+            and event["reason_code"] == "proof_verified"
+        ):
+            successful_interactions.setdefault(key, event)
+        elif (
+            event["event_type"] == "authentication.denied"
+            and event["reason_code"] == "challenge_replayed"
+            and key in successful_interactions
+            and successful_interactions[key]["event_id"] < event["event_id"]
+        ):
+            replay_events.setdefault(key, []).append(event)
+
+    findings = []
+    for key, replays in replay_events.items():
+        success = successful_interactions[key]
+        user_id, device_id, fingerprint = key[1]
+        findings.append(
+            {
+                "finding_type": "challenge_replay_after_success",
+                "user_id": user_id,
+                "device_id": device_id,
+                "public_key_fingerprint": fingerprint,
+                "evidence_event_ids": [success["event_id"]]
+                + [event["event_id"] for event in replays],
+                "fact": (
+                    "A successfully consumed one-time challenge was submitted again "
+                    "and rejected."
+                ),
+                "interpretation": (
+                    "The evidence shows challenge reuse after authentication success."
+                ),
+                "limitation": (
+                    "This does not prove malicious replay; a retry after response "
+                    "uncertainty is also plausible."
+                ),
+            }
+        )
+    return findings
+
+
+def _post_revocation_findings(analyzed_events):
+    revocations = {}
+    denied_requests = {}
+    for event, _ in analyzed_events:
+        context = _binding_context(event)
+        if event["event_type"] in {
+            "authenticator.revoked",
+            "authenticator.replacement_prepared",
+        }:
+            revocations.setdefault(context, event)
+        elif (
+            event["event_type"] == "authentication.denied"
+            and event["reason_code"] == "binding_revoked"
+            and context in revocations
+            and revocations[context]["event_id"] < event["event_id"]
+        ):
+            denied_requests.setdefault(context, []).append(event)
+
+    findings = []
+    for context, requests in denied_requests.items():
+        revocation = revocations[context]
+        user_id, device_id, fingerprint = context
+        findings.append(
+            {
+                "finding_type": "post_revocation_targeting",
+                "user_id": user_id,
+                "device_id": device_id,
+                "public_key_fingerprint": fingerprint,
+                "evidence_event_ids": [revocation["event_id"]]
+                + [event["event_id"] for event in requests],
+                "fact": (
+                    "Authentication activity targeted this binding after its terminal "
+                    "revocation and was rejected."
+                ),
+                "interpretation": (
+                    "This can indicate stale client configuration or continued attempts "
+                    "that name the revoked binding."
+                ),
+                "limitation": (
+                    "The requester was not cryptographically verified, so this does not "
+                    "prove the revoked authenticator or private key sent the request."
+                ),
+            }
+        )
+    return findings
+
+
+def analyze_security_events(
+    database_path,
+    user_id,
+    device_id=None,
+    limit=DEFAULT_SECURITY_ANALYSIS_LIMIT,
+):
+    """Derive bounded identity findings from one consistent committed event snapshot."""
+    validate_identifier(user_id, "user_id")
+    if device_id is not None:
+        validate_identifier(device_id, "device_id")
+    if not isinstance(limit, int) or not 1 <= limit <= MAX_SECURITY_EVENT_QUERY_LIMIT:
+        raise ValueError(
+            f"limit must be between 1 and {MAX_SECURITY_EVENT_QUERY_LIMIT}."
+        )
+
+    connection = _open_existing_database(database_path)
+    try:
+        connection.execute("BEGIN")
+        conditions = ["user_id = ?"]
+        parameters = [user_id]
+        if device_id is not None:
+            conditions.append("(device_id = ? OR related_device_id = ?)")
+            parameters.extend((device_id, device_id))
+        parameters.append(limit + 1)
+        rows = connection.execute(
+            f"""
+            SELECT
+                event_id,
+                occurred_at,
+                event_type,
+                outcome,
+                reason_code,
+                actor_kind,
+                actor_assurance,
+                user_id,
+                device_id,
+                related_device_id,
+                public_key_fingerprint,
+                interaction_id
+            FROM security_events
+            WHERE {' AND '.join(conditions)}
+            ORDER BY event_id DESC
+            LIMIT ?
+            """,
+            parameters,
+        ).fetchall()
+        truncated = len(rows) > limit
+        timeline = [dict(row) for row in reversed(rows[:limit])]
+        analyzed_events = [
+            (event, _validate_analysis_event(event)) for event in timeline
+        ]
+        findings = (
+            _invalid_signature_findings(analyzed_events)
+            + _replay_findings(analyzed_events)
+            + _post_revocation_findings(analyzed_events)
+        )
+        findings.sort(key=lambda finding: max(finding["evidence_event_ids"]))
+        connection.commit()
+        return {
+            "scope": {"user_id": user_id, "device_id": device_id},
+            "policy": {
+                "invalid_signature_distinct_interactions": (
+                    INVALID_SIGNATURE_FINDING_THRESHOLD
+                ),
+                "invalid_signature_window_seconds": (
+                    INVALID_SIGNATURE_FINDING_WINDOW_SECONDS
+                ),
+            },
+            "complete": not truncated,
+            "completeness_note": (
+                "All stored events matching this scope were analyzed."
+                if not truncated
+                else (
+                    "Only the newest bounded selection was analyzed; earlier activity "
+                    "may affect the result."
+                )
+            ),
+            "events_examined": len(timeline),
+            "timeline": timeline,
+            "findings": findings,
+        }
+    except DatabaseError:
+        _rollback_quietly(connection)
+        raise
+    except sqlite3.DatabaseError as exc:
+        _rollback_quietly(connection)
+        raise DatabaseOperationError(
+            "Security evidence could not be analyzed safely."
+        ) from exc
     finally:
         connection.close()
 

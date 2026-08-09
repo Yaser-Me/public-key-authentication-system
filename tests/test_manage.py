@@ -57,6 +57,9 @@ class ManageCliTests(unittest.TestCase):
         )
         inventory_exit, inventory = self._run("inventory", "--user-id", "student1")
         events_exit, evidence = self._run("events", "--user-id", "student1")
+        investigation_exit, investigation = self._run(
+            "investigate", "--user-id", "student1"
+        )
 
         self.assertEqual(create_exit, 0)
         self.assertEqual(create_result["status"], "created")
@@ -80,6 +83,10 @@ class ManageCliTests(unittest.TestCase):
         )
         self.assertNotIn(authorization["authorization_id"], json.dumps(evidence))
         self.assertNotIn(authorization["authorization_secret"], json.dumps(evidence))
+        self.assertEqual(investigation_exit, 0)
+        self.assertTrue(investigation["complete"])
+        self.assertEqual(investigation["findings"], [])
+        self.assertEqual(investigation["timeline"], evidence["events"])
 
     def test_revoke_preserves_first_reason_and_warns_for_last_active_binding(self):
         self._run("init")
