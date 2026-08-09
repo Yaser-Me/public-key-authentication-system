@@ -162,17 +162,6 @@ write, and the route needs only the update result.
 
 These are documented technical debt, not properties claimed as secure.
 
-## Market-relevant skill strengthened
-
-This milestone provides concrete evidence of secure software development and
-identity-state integrity: the original unsafe behavior is characterized, state
-changes are transactional, malformed inputs fail predictably, duplicate key
-replacement is blocked, rollback and concurrency behavior are tested, and
-runtime secrets remain isolated from the repository.
-
-It does not yet prove authorized authenticator lifecycle, complete protocol
-hardening, telemetry, detection engineering, or incident response.
-
 ## Complexity and learning fit
 
 The implementation stays within the existing code level. It introduces direct

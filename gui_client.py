@@ -69,7 +69,7 @@ def do_login():
 #----- GUI layout ----
 
 root = tk.Tk()
-root.title("Passwordless Auth Demo")
+root.title("Passwordless Identity Security Lab")
 
 tk.Label(root, text="User ID").pack(pady=(10, 0))
 entry_user = tk.Entry(root, width=30)
