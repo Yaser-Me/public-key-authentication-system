@@ -113,9 +113,29 @@ is an explicit local-lab availability limitation, while inspection remains
 bounded. Later work must not silently describe this local history as an enterprise
 retention or audit system.
 
+## Bounded on-demand investigation
+
+Milestone 6 derives three findings from a single bounded SQLite read snapshot:
+
+- three invalid-signature denials for one authoritative binding across distinct
+  challenge interactions within the documented ten-minute lab policy window;
+- challenge replay recorded after successful consumption of that same interaction;
+- activity targeting a binding after direct revocation or revoke-first replacement.
+
+The analysis is identity-scoped, read-only, and non-persistent. It returns the
+chronological event selection, exact evidence event IDs, a verified fact, cautious
+interpretation, and a limitation for each finding. A result marked incomplete used
+only the newest bounded selection, so absence of a finding does not establish absence
+of older activity.
+
+Invalid signatures prove failed verification for authoritative challenge context,
+not who sent the request. Replay can also be a benign retry after response
+uncertainty. Post-revocation targeting proves that a request named the revoked
+binding, not that its old private key was used. Expiry and challenge-limit events are
+timeline context rather than findings.
+
 ## Deliberate non-goals
 
-M5 adds no detections, alerts, severity scoring, dashboards, event shipping,
-automatic response, hash chain, background service, KQL/SPL, MITRE mapping, or
-generic investigation workflow. A later M6 is conditional on whether the actual
-events support a small set of useful identity-specific behaviors.
+The evidence and analysis add no persisted alerts, severity scoring, dashboards,
+event shipping, automatic response, hash chain, background service, KQL/SPL,
+MITRE mapping, generic rule framework, or SOC workflow.

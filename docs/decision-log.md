@@ -269,3 +269,21 @@ attributable, or an enterprise audit system. M5 adds no retention automation,
 detections, alerts, severity framework, event shipping, dashboards, or SIEM
 integration. M6 is conditional on whether this real event model supports a small,
 identity-specific investigation/detection milestone with proportional value.
+
+## 2026-08-09 — Derive bounded identity findings on demand
+
+**Decision:** Use one consistent, bounded SQLite read snapshot to derive three
+identity-specific findings from committed M5 evidence: repeated invalid proofs over
+distinct challenge interactions within a documented ten-minute lab policy window,
+replay after successful challenge consumption, and activity targeting a terminally
+revoked binding. Return the selected timeline and exact evidence-event links with
+separate fact, interpretation, and limitation text.
+
+Findings are calculated on demand and are not stored. Challenge expiry and challenge
+limits remain investigation context rather than standalone findings.
+
+**Consequences:** No schema migration, alert lifecycle, background monitor, generic
+rule format, severity system, or automatic response is introduced. A truncated
+selection is explicitly incomplete. Unverified requests cannot be attributed to a
+person, physical device, or private-key holder, and the invalid-signature threshold
+is a reproducible lab analysis policy rather than a universal security standard.

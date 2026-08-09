@@ -29,8 +29,9 @@ that stands on its own product and evidence needs.
 
 It is a focused, reproducible identity-security project demonstrating secure
 authentication, authenticator lifecycle controls, trustworthy security evidence,
-validation, testing, and technical communication. A later small detection or
-investigation capability is conditional on the real event model adding genuine value.
+validation, testing, and technical communication. The completed evidence model
+supports one bounded, on-demand identity investigation capability; it does not
+justify a generic detection or SOC platform.
 
 It must not falsely present itself as enterprise IAM infrastructure. Decisions
 for this repository must not be limited by the existence or scope of another
@@ -126,8 +127,8 @@ The final project should demonstrate that the user can:
 |---|---|---|
 | Identity and access management | Device enrollment, authentication, revocation, actor authorization, lifecycle state, least privilege | Implemented controls, automated security tests, diagrams, decision records |
 | Security monitoring | Important authentication and administrative decisions produce structured events | Stable event schema, sanitized event samples, schema tests |
-| Detection engineering (conditional) | A small number of identity-specific behaviors may become explicit, testable logic if M5 evidence supports them | Detection hypothesis, positive and negative tests, false-positive notes |
-| Incident investigation (conditional) | A local analyst may reconstruct supported facts from actual identity events | Evidence-linked timeline that separates verified facts from inference |
+| Detection engineering (bounded) | Three identity-specific event relationships become explicit, testable on-demand logic | Detection hypothesis, positive and negative tests, false-positive notes |
+| Incident investigation (bounded) | A local analyst reconstructs supported facts from actual identity events | Evidence-linked timeline that separates verified facts from inference |
 | Response and remediation | A compromised or abusive device can be contained and secure state restored | Revocation, challenge invalidation, rate-limit or access-control evidence, recovery tests |
 | Secure development | Security behavior remains correct across changes | Unit, integration, security, and regression tests; CI; reviewed dependencies |
 | Technical reporting | A reviewer can understand the risk, design, evidence, limits, and result | README, threat model, incident report, executive summary, limitations |
@@ -155,9 +156,9 @@ The lab safely reproduces identity-security events such as:
 The system generates structured audit events for these actions.
 
 M5 records a bounded set of these identity outcomes as structured application
-evidence. After M5, the project must decide whether 2-4 deterministic,
-identity-specific behaviors justify a small M6. Detection, alerting, and a full SOC
-workflow are not required outcomes for this supporting repository.
+evidence. M6 uses that evidence for three on-demand, identity-specific correlations
+with explicit false-positive limitations. It adds no persistent alerts or SOC
+workflow.
 
 ---
 

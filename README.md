@@ -187,6 +187,7 @@ python manage.py inventory --user-id student1
 python manage.py revoke student1 laptop1 suspected_compromise
 python manage.py replacement-prepare student1 old-laptop replacement-laptop suspected_compromise
 python manage.py events --user-id student1 --limit 100
+python manage.py investigate --user-id student1 --limit 100
 ```
 
 `enrollment-issue` displays the authorization ID and bearer secret once. Do not
@@ -211,6 +212,14 @@ selection. It can filter by logical identity, binding (including a replacement's
 related binding), or exact event type. The event table never stores enrollment
 bearer values, private-key material, passphrases, raw signatures, or challenge
 nonces.
+
+`investigate` reads one bounded, consistent snapshot of an identity's committed
+events and derives three non-persistent findings: repeated invalid proofs across
+three distinct challenges within the ten-minute lab policy window, challenge replay
+after a successful authentication, and requests targeting a binding after terminal
+revocation. Each finding cites exact event IDs and separates facts, interpretation,
+and limitations. Expiry and challenge-limit events remain timeline context. If the
+selection is truncated, the output says that earlier activity may affect the result.
 
 ## API endpoints
 
@@ -291,8 +300,9 @@ production authentication service.
   failing database cannot be relied on to preserve evidence of its own failure.
   Client-local passphrase failures and lost responses are not server-observable and
   are deliberately absent from server evidence.
-- There are no detections, alerts, generic investigation workflow, event shipping,
-  or SIEM integration. Any later M6 remains conditional on the real M5 event model.
+- Findings are derived on demand from the local event history. They are not persisted
+  alerts, attacker attribution, continuous monitoring, or SIEM integration. The
+  invalid-signature threshold is a lab analysis policy, not a universal attack rule.
 - Existing `database.json` files are not imported automatically. Initialization
   never silently replaces them or any unreadable SQLite state.
 

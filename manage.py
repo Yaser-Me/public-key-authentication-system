@@ -6,6 +6,7 @@ from pathlib import Path
 from db_utils import (
     DATABASE_ENV_VAR,
     DatabaseError,
+    analyze_security_events,
     cancel_enrollment_authorization,
     create_identity,
     get_database_status,
@@ -69,6 +70,14 @@ def build_parser():
     events.add_argument("--device-id")
     events.add_argument("--event-type")
     events.add_argument("--limit", type=int, default=100)
+
+    investigate = subparsers.add_parser(
+        "investigate",
+        help="Derive bounded identity findings with an evidence-linked timeline.",
+    )
+    investigate.add_argument("--user-id", required=True)
+    investigate.add_argument("--device-id")
+    investigate.add_argument("--limit", type=int, default=100)
 
     revoke = subparsers.add_parser(
         "revoke", help="Terminally revoke an authenticator and invalidate its challenges."
@@ -196,6 +205,16 @@ def main(argv=None):
                 limit=args.limit,
             )
             print(json.dumps({"events": result}, indent=2, sort_keys=True))
+            return 0
+
+        if args.command == "investigate":
+            result = analyze_security_events(
+                database_path,
+                user_id=args.user_id,
+                device_id=args.device_id,
+                limit=args.limit,
+            )
+            print(json.dumps(result, indent=2, sort_keys=True))
             return 0
 
         if args.command == "revoke":

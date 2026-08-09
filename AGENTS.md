@@ -107,7 +107,7 @@ follow the approved project phase and `docs/decision-log.md`.
 - This is logical software-authenticator lifecycle state, not physical-device
   identity, hardware attestation, human identity proofing, or generic recovery.
 
-## Current M5 security-evidence milestone
+## Completed M5 security-evidence milestone
 
 - Add only application-native evidence that materially explains identity lifecycle
   and authentication decisions. Identity Security/IAM and Secure Software
@@ -118,12 +118,23 @@ follow the approved project phase and `docs/decision-log.md`.
 - Exclude passphrases, bearer secrets, private keys, raw signatures, credential
   material, and unnecessary challenge nonce data. Local SQLite evidence shares the
   application's trusted-OS/database boundary and is not tamper-proof or independent.
-- Keep inspection local, bounded, structured, and CLI-first. Do not add detections,
-  alerts, dashboards, log shipping, event buses, severity frameworks, or SIEM/SOC
-  infrastructure during M5.
-- M6 is conditional. After M5, inspect the real event model and proceed only if a
-  substantially smaller set of identity-specific detections/investigation views adds
-  genuine value; KQL, SPL, dashboards, and generic SOC workflows are not commitments.
+- Inspection is local, bounded, structured, and CLI-first. The v4 evidence model
+  does not add alerts, dashboards, log shipping, event buses, severity frameworks,
+  or SIEM/SOC infrastructure.
+
+## Current M6 bounded findings milestone
+
+- Derive findings on demand from committed M5 events; do not persist alerts or add
+  a schema migration, background worker, generic rule format, or automatic response.
+- Limit analysis to repeated invalid proofs across distinct challenges, replay after
+  a successful challenge consumption, and requests targeting a terminally revoked
+  binding. Challenge expiry and limit events are timeline context only.
+- Return a bounded chronological timeline and exact evidence-event links. Keep
+  verified facts separate from cautious interpretation and explicitly report when
+  earlier matching evidence was truncated.
+- Preserve M5 actor assurance: a denial naming a binding does not prove which person,
+  physical device, or private key sent it. Keep the implementation substantially
+  smaller than the lifecycle and evidence milestones.
 
 ## Milestone process
 
