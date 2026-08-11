@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import manage
 from crypto_utils import generate_rsa_keypair, validate_rsa_public_key
-from db_utils import DATABASE_ENV_VAR, get_device, register_device
+from db_utils import DATABASE_ENV_VAR, get_database_status, get_device, register_device
 
 
 class ManageCliTests(unittest.TestCase):
@@ -87,6 +87,40 @@ class ManageCliTests(unittest.TestCase):
         self.assertTrue(investigation["complete"])
         self.assertEqual(investigation["findings"], [])
         self.assertEqual(investigation["timeline"], evidence["events"])
+
+    def test_enrollment_list_uses_sanitized_bounded_read_only_output(self):
+        self._run("init")
+        self._run("identity-add", "student1")
+        _, authorization = self._run("enrollment-issue", "student1", "laptop1")
+        events_before = get_database_status(self.database_path)["security_events"]
+
+        list_exit, result = self._run(
+            "enrollment-list", "--user-id", "student1", "--limit", "1"
+        )
+
+        self.assertEqual(list_exit, 0)
+        self.assertEqual(len(result["authorizations"]), 1)
+        listed = result["authorizations"][0]
+        self.assertEqual(
+            set(listed),
+            {
+                "authorization_id",
+                "user_id",
+                "device_id",
+                "created_at",
+                "expires_at",
+                "state",
+            },
+        )
+        self.assertEqual(listed["authorization_id"], authorization["authorization_id"])
+        self.assertEqual(listed["user_id"], "student1")
+        self.assertEqual(listed["device_id"], "laptop1")
+        self.assertEqual(listed["state"], "open")
+        self.assertNotIn("authorization_secret", json.dumps(result))
+        self.assertNotIn(authorization["authorization_secret"], json.dumps(result))
+        self.assertEqual(
+            get_database_status(self.database_path)["security_events"], events_before
+        )
 
     def test_revoke_preserves_first_reason_and_warns_for_last_active_binding(self):
         self._run("init")

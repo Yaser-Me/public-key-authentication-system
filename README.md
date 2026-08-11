@@ -130,6 +130,10 @@ Start the API:
 python server.py
 ```
 
+`server.py` is a launcher, not a conventional command-line interface. In the
+current implementation, `python server.py --help` also starts the server; use
+`manage.py --help` or `client.py --help` for command help.
+
 In a second terminal, start the secondary desktop client:
 
 ```powershell
@@ -196,6 +200,7 @@ decision to initialize a separate SQLite path; no legacy migration is performed.
 ```powershell
 python manage.py identity-add student1
 python manage.py enrollment-issue student1 laptop1
+python manage.py enrollment-list --user-id student1 --device-id laptop1
 python manage.py enrollment-cancel AUTHORIZATION_ID
 python manage.py inventory --user-id student1
 python manage.py revoke student1 laptop1 suspected_compromise
@@ -208,6 +213,18 @@ python manage.py investigate --user-id student1 --limit 100
 place the secret in source code, repository files, or screenshots. It is scoped
 to the supplied identity and binding label, expires after ten minutes by default,
 and is consumed only by a successful committed binding.
+
+`enrollment-list` is a trusted-local, read-only, bounded view for rediscovering
+authorization IDs and lifecycle state for one logical identity. It can narrow to
+one binding and returns only the authorization ID, scope, timestamps, and derived
+`open`, `expired`, `cancelled`, or `consumed` state. It never returns bearer
+secrets, secret digests, or consumed public-key material.
+
+After a denied or uncertain enrollment result, first inspect authoritative
+inventory and preserve the local Credential-v1. If the binding is absent and a
+fresh authorization is needed, issue it for the same scope, then use
+`retry-enrollment` with the preserved credential and key. Do not run `enroll`
+again for that credential.
 
 `replacement-prepare` is a trusted-local containment action. In one SQLite
 transaction it terminally revokes the old binding and issues an authorization
@@ -294,6 +311,10 @@ replacement/authentication lifecycle, transactional evidence, and findings:
 .\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_security_events.py" -v
 .\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_security_analysis.py" -v
 ```
+
+When `investigate` reports `complete: true`, that applies to its requested user
+and optional binding scope. It does not mean every global database event was
+analyzed.
 
 ## API endpoints
 

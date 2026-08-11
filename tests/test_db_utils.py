@@ -1,5 +1,6 @@
 import base64
 import concurrent.futures
+import json
 import os
 import sqlite3
 import tempfile
@@ -30,6 +31,7 @@ from db_utils import (
     issue_authentication_challenge,
     issue_enrollment_authorization,
     list_authenticator_inventory,
+    list_enrollment_authorizations,
     migrate_database,
     prepare_authenticator_replacement,
     register_device,
@@ -897,6 +899,89 @@ class DatabaseTests(unittest.TestCase):
         register_device(self.database_path, "student1", "already1", public_key_b64, fingerprint)
         with self.assertRaises(DuplicateDeviceError):
             self._issue(device_id="already1")
+
+    def test_list_enrollment_authorizations_is_sanitized_bounded_and_read_only(self):
+        self._create_identity()
+        issued_at = "2026-01-01T00:00:00+00:00"
+        with patch.object(db_utils, "utc_now", return_value=issued_at):
+            consumed = self._issue(device_id="consumed1")
+            cancelled = self._issue(device_id="cancelled1")
+            expired = self._issue(device_id="expired1")
+            open_authorization = issue_enrollment_authorization(
+                self.database_path,
+                "student1",
+                "open1",
+                lifetime_seconds=3600,
+            )
+            self._create_identity("student2")
+            other_user = issue_enrollment_authorization(
+                self.database_path, "student2", "phone1"
+            )
+
+        public_key_b64, fingerprint = self._public_key_values()
+        with patch.object(db_utils, "utc_now", return_value="2026-01-01T00:01:00+00:00"):
+            bind_authenticator(
+                self.database_path,
+                "student1",
+                "consumed1",
+                public_key_b64,
+                fingerprint,
+                consumed["authorization_id"],
+                consumed["authorization_secret"],
+            )
+            self.assertEqual(
+                cancel_enrollment_authorization(
+                    self.database_path, cancelled["authorization_id"]
+                ),
+                "cancelled",
+            )
+
+        events_before = get_database_status(self.database_path)["security_events"]
+        with patch.object(db_utils, "utc_now", return_value="2026-01-01T00:20:00+00:00"):
+            authorizations = list_enrollment_authorizations(
+                self.database_path, "student1"
+            )
+            open_only = list_enrollment_authorizations(
+                self.database_path, "student1", device_id="open1"
+            )
+            bounded = list_enrollment_authorizations(
+                self.database_path, "student1", limit=2
+            )
+        events_after = get_database_status(self.database_path)["security_events"]
+
+        by_device = {record["device_id"]: record for record in authorizations}
+        self.assertEqual(
+            {record["device_id"] for record in authorizations},
+            {"consumed1", "cancelled1", "expired1", "open1"},
+        )
+        self.assertEqual(by_device["consumed1"]["state"], "consumed")
+        self.assertEqual(by_device["cancelled1"]["state"], "cancelled")
+        self.assertEqual(by_device["expired1"]["state"], "expired")
+        self.assertEqual(by_device["open1"]["state"], "open")
+        self.assertEqual(open_only, [by_device["open1"]])
+        self.assertEqual(len(bounded), 2)
+        self.assertEqual(events_after, events_before)
+
+        serialized = json.dumps(authorizations, sort_keys=True)
+        self.assertNotIn("secret_digest", serialized)
+        self.assertNotIn(consumed["authorization_secret"], serialized)
+        self.assertNotIn(cancelled["authorization_secret"], serialized)
+        self.assertNotIn(expired["authorization_secret"], serialized)
+        self.assertNotIn(open_authorization["authorization_secret"], serialized)
+        self.assertNotIn(other_user["authorization_secret"], serialized)
+
+    def test_list_enrollment_authorizations_validates_filters_and_limit(self):
+        self._create_identity()
+        with self.assertRaises(ValueError):
+            list_enrollment_authorizations(self.database_path, "invalid user")
+        with self.assertRaises(ValueError):
+            list_enrollment_authorizations(
+                self.database_path, "student1", device_id="invalid device"
+            )
+        with self.assertRaises(ValueError):
+            list_enrollment_authorizations(self.database_path, "student1", limit=0)
+        with self.assertRaises(ValueError):
+            list_enrollment_authorizations(self.database_path, "student1", limit=1001)
 
     def test_concurrent_authorization_issuance_leaves_one_open_authorization(self):
         self._create_identity()

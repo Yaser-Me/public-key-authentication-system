@@ -17,6 +17,7 @@ DEFAULT_ENROLLMENT_LIFETIME_SECONDS = 10 * 60
 DEFAULT_CHALLENGE_LIFETIME_SECONDS = 5 * 60
 MAX_OUTSTANDING_CHALLENGES_PER_BINDING = 8
 MAX_SECURITY_EVENT_QUERY_LIMIT = 1000
+MAX_ENROLLMENT_AUTHORIZATION_QUERY_LIMIT = 1000
 DEFAULT_SECURITY_ANALYSIS_LIMIT = 100
 INVALID_SIGNATURE_FINDING_THRESHOLD = 3
 INVALID_SIGNATURE_FINDING_WINDOW_SECONDS = 10 * 60
@@ -1691,6 +1692,86 @@ def list_authenticator_inventory(database_path, user_id=None, fingerprint=None):
         return inventory
     except sqlite3.DatabaseError as exc:
         raise DatabaseOperationError("Authenticator inventory could not be read.") from exc
+    finally:
+        connection.close()
+
+
+def list_enrollment_authorizations(
+    database_path, user_id, device_id=None, limit=100
+):
+    """Return a bounded, sanitized authorization view for trusted local administration."""
+    validate_identifier(user_id, "user_id")
+    if device_id is not None:
+        validate_identifier(device_id, "device_id")
+    if (
+        not isinstance(limit, int)
+        or not 1 <= limit <= MAX_ENROLLMENT_AUTHORIZATION_QUERY_LIMIT
+    ):
+        raise ValueError(
+            "limit must be between 1 and "
+            f"{MAX_ENROLLMENT_AUTHORIZATION_QUERY_LIMIT}."
+        )
+
+    connection = _open_existing_database(database_path)
+    try:
+        connection.execute("BEGIN")
+        timestamp = utc_now()
+        conditions = ["user_id = ?"]
+        parameters = [user_id]
+        if device_id is not None:
+            conditions.append("device_id = ?")
+            parameters.append(device_id)
+        parameters.append(limit)
+        rows = connection.execute(
+            f"""
+            SELECT
+                authorization_id,
+                user_id,
+                device_id,
+                created_at,
+                expires_at,
+                cancelled_at,
+                consumed_at
+            FROM enrollment_authorizations
+            WHERE {' AND '.join(conditions)}
+            ORDER BY created_at DESC, authorization_id DESC
+            LIMIT ?
+            """,
+            parameters,
+        ).fetchall()
+        current_time = _parse_timestamp(timestamp, "current")
+        authorizations = []
+        for row in reversed(rows):
+            record = dict(row)
+            # A recorded terminal outcome remains authoritative after wall-clock expiry.
+            if record["consumed_at"] is not None:
+                state = "consumed"
+            elif record["cancelled_at"] is not None:
+                state = "cancelled"
+            elif _parse_timestamp(record["expires_at"], "expiry") <= current_time:
+                state = "expired"
+            else:
+                state = "open"
+            authorizations.append(
+                {
+                    "authorization_id": record["authorization_id"],
+                    "user_id": record["user_id"],
+                    "device_id": record["device_id"],
+                    "created_at": record["created_at"],
+                    "expires_at": record["expires_at"],
+                    "state": state,
+                }
+            )
+        connection.commit()
+        return authorizations
+    except DatabaseError:
+        _rollback_quietly(connection)
+        raise
+    except sqlite3.DatabaseError as exc:
+        _rollback_quietly(connection)
+        raise DatabaseOperationError(
+            "Enrollment authorizations could not be read."
+        ) from exc
     finally:
         connection.close()
 

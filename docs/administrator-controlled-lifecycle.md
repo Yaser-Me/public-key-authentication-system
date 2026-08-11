@@ -94,6 +94,14 @@ Issuing a replacement for the same scope cancels an earlier still-open one in th
 same SQLite write transaction. Concurrent issuance is serialized by SQLite; no
 process-global lock or token framework is used.
 
+`manage.py enrollment-list --user-id USER_ID [--device-id DEVICE_ID] [--limit N]`
+is a trusted-local, read-only, bounded operational view. It helps an administrator
+rediscover authorization IDs after transient terminal output or shell variables
+are lost. It returns only the ID, scope, creation/expiry timestamps, and derived
+`open`, `expired`, `cancelled`, or `consumed` state; it never returns bearer
+secrets, secret digests, or consumed public-key material. A stored `consumed` or
+`cancelled` outcome takes precedence over elapsed expiry.
+
 The client submits the authorization ID and secret, a validated RSA public key,
 and a proof that it possesses the corresponding private key. The proof is a
 deterministic, length-prefixed enrollment context containing:
@@ -138,6 +146,12 @@ If the binding was revoked after initial enrollment, reconciliation returns its
 current `revoked` state rather than claiming the key remains active or usable. If
 consumed authorization state contradicts binding state, the service fails closed
 as `state_unavailable`.
+
+After a denied or uncertain enrollment outcome, inspect trusted inventory before
+any cleanup and preserve the existing Credential-v1. If the binding is absent and
+a fresh authorization is needed, issue it for the same scope and use
+`retry-enrollment` with the same credential and key. Do not run `enroll` again
+for that credential.
 
 RSA-PSS signatures are randomized. Exact retry means the same trusted context and
 key, not byte-for-byte identical signatures. Two concurrent identical requests may
