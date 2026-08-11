@@ -1,23 +1,57 @@
 # Passwordless Identity Security Lab
 
-A local, CLI-first lab for the lifecycle around software public-key
-authentication. It covers what basic public-key login leaves open: who may bind
-a credential, how that credential is stored, how a compromised binding is
-contained and replaced, and what local evidence remains afterward.
+[![CI](https://github.com/Yaser-Me/public-key-authentication-system/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/Yaser-Me/public-key-authentication-system/actions/workflows/ci.yml)
 
-It is a small learning and testing system, not a production authentication
-service. Authentication returns a result; it does not create a session or grant
-access to another application.
+A local, CLI-first identity-security lab for controlled software-authenticator
+enrollment, credential custody, RSA-PSS challenge-response authentication,
+terminal revocation and replacement, and local security evidence.
 
-## The model
+Built with Python 3.12, Flask, SQLite, and `cryptography`. It returns
+authentication decisions rather than creating application sessions, and it does
+not claim production IAM.
 
-- A trusted local administrator creates identities and authorizes one
-  authenticator binding at a time.
-- The client creates a passphrase-protected RSA credential and proves possession
-  of its private key.
-- The server verifies expiring, single-use challenge responses, records lifecycle
-  decisions in SQLite, and can terminally revoke a binding before authorizing a
-  distinct replacement.
+## System at a glance
+
+```mermaid
+flowchart LR
+    Admin["Trusted administrator CLI<br/>identity · authorize · revoke · replace"]
+    Credential["Credential-v1<br/>encrypted local RSA key"]
+    Client["Client CLI<br/>unlock · enroll · authenticate"]
+    API["Flask loopback API<br/>bind · challenge · verify"]
+    State[("SQLite<br/>lifecycle state + security events")]
+    Inspect["Local inspection<br/>inventory · events · findings"]
+
+    Admin -->|lifecycle transactions| State
+    Credential --> Client
+    Client -->|RSA-PSS proofs| API
+    API -->|validated transitions| State
+    State --> Inspect
+```
+
+## What the lifecycle enforces
+
+- Enrollment authorizations are scoped, expiring, and single-use; binding
+  requires RSA-PSS proof of possession, while an uncertain response can
+  reconcile only the same committed key.
+- Credential-v1 uses Argon2id and AES-256-GCM, no-overwrite publication, and
+  local unlock before challenge issuance.
+- PKAS-AUTH-V2 signs a context-bound RSA-PSS challenge; SQLite allows each
+  expiring challenge to succeed once, including under concurrent verification.
+- Revocation is terminal, and replacement revokes first before enrolling a
+  distinct binding and key.
+- Authoritative state changes and success events commit together; denial
+  evidence and derived findings remain bounded and cautiously attributed.
+
+## Important boundaries
+
+- The trusted local OS account is the administration boundary; mutually
+  untrusted local users are outside scope.
+- Enrollment uses loopback HTTP. The lab does not claim protected-channel or
+  phishing resistance.
+- Credentials are software, passphrase-protected application files—not
+  hardware-backed storage or protection from same-account malware.
+- Events share the local SQLite and OS boundary. They are not tamper-proof,
+  independently attributable, centrally retained, or automated alerts.
 
 ## Run the lab
 
@@ -97,18 +131,29 @@ investigation links the replacement preparation and the denied old-binding
 request as `post_revocation_targeting`; it makes no claim about who sent that
 request.
 
-## Important boundaries
+## Project map
 
-- The trusted local OS account is the administration boundary; mutually
-  untrusted local users are outside scope.
-- Enrollment uses loopback HTTP. The lab does not claim protected-channel or
-  phishing resistance.
-- Credentials are software, passphrase-protected application files—not
-  hardware-backed storage or protection from same-account malware.
-- Events share the local SQLite and OS boundary. They are not tamper-proof,
-  independently attributable, centrally retained, or automated alerts.
+| Path | Responsibility |
+|---|---|
+| `manage.py` | Trusted-local lifecycle and inspection commands |
+| `client.py` / `credential_store.py` | Enrollment, authentication, Credential-v1 custody, and migration |
+| `server.py` / `crypto_utils.py` | HTTP boundary and RSA-PSS protocol operations |
+| `db_utils.py` | SQLite lifecycle, transactions, evidence, and analysis |
+| `tests/` | Protocol, migration, rollback, concurrency, and failure evidence |
+| `docs/` | Lifecycle, credential-storage, and security-evidence details |
 
-## Read more
+## Validation
+
+CI compiles and runs the full suite on Python 3.12 for Windows and Ubuntu. Run
+the same checks locally:
+
+```powershell
+.\.venv\Scripts\python.exe -m compileall -q .
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -m pip check
+```
+
+## Design notes
 
 - [Authenticator lifecycle](docs/authenticator-lifecycle.md)
 - [Credential storage](docs/credential-storage.md)
@@ -116,9 +161,3 @@ request.
 
 Existing v1, v2, or v3 SQLite state requires explicit migration; see the
 lifecycle note before running `python manage.py migrate`.
-
-## Run the tests
-
-```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
-```
