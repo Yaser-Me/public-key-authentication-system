@@ -14,6 +14,7 @@ from db_utils import (
     initialize_database,
     issue_enrollment_authorization,
     list_authenticator_inventory,
+    list_enrollment_authorizations,
     list_security_events,
     migrate_database,
     prepare_authenticator_replacement,
@@ -56,6 +57,14 @@ def build_parser():
         "enrollment-cancel", help="Cancel an open enrollment authorization."
     )
     authorization_cancel.add_argument("authorization_id")
+
+    authorization_list = subparsers.add_parser(
+        "enrollment-list",
+        help="List bounded sanitized enrollment authorization lifecycle state.",
+    )
+    authorization_list.add_argument("--user-id", required=True)
+    authorization_list.add_argument("--device-id")
+    authorization_list.add_argument("--limit", type=int, default=100)
 
     inventory = subparsers.add_parser(
         "inventory", help="Show sanitized identity and authenticator lifecycle state."
@@ -185,6 +194,16 @@ def main(argv=None):
                     sort_keys=True,
                 )
             )
+            return 0
+
+        if args.command == "enrollment-list":
+            result = list_enrollment_authorizations(
+                database_path,
+                user_id=args.user_id,
+                device_id=args.device_id,
+                limit=args.limit,
+            )
+            print(json.dumps({"authorizations": result}, indent=2, sort_keys=True))
             return 0
 
         if args.command == "inventory":
