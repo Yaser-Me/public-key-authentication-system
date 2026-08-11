@@ -74,7 +74,7 @@ def create_v1_database(database_path):
 
 
 def create_v2_database(database_path):
-    """Create the exact fresh Milestone 2 schema for the v2-to-v3 test."""
+    """Create the fresh v2 schema used by the v2-to-v3 migration test."""
     connection = sqlite3.connect(database_path)
     try:
         connection.execute(

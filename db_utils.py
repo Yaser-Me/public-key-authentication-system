@@ -338,7 +338,7 @@ def _create_v4_schema(connection):
 
 
 def _create_enrollment_authorization_schema(connection):
-    """Create the one Milestone 1 table shared by initialization and migration."""
+    """Create the enrollment-authorization table shared by initialization and migration."""
     connection.execute(ENROLLMENT_AUTHORIZATIONS_TABLE_SQL)
     connection.execute(ENROLLMENT_AUTHORIZATIONS_SCOPE_INDEX_SQL)
 
