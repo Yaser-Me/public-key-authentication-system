@@ -2,180 +2,227 @@
 
 [![CI](https://github.com/Yaser-Me/public-key-authentication-system/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/Yaser-Me/public-key-authentication-system/actions/workflows/ci.yml)
 
-A local, CLI-first identity-security lab for controlled software-authenticator
-enrollment, credential custody, RSA-PSS challenge-response authentication,
-terminal revocation and replacement, and local security evidence.
+This is a small local login system. Instead of checking a password, the server
+asks an approved device to prove that it owns a private key. The device does
+that by signing a fresh challenge from the server.
 
-Built with Python 3.12, Flask, SQLite, and `cryptography`. It returns
-authentication decisions rather than creating application sessions, and it does
-not claim production IAM.
+An administrator decides which device may join. If that device should no longer
+be trusted, its access is permanently revoked; a replacement joins with a new
+key. The lab records the important security events so you can inspect what
+happened afterward.
 
-## System at a glance
+“Passwordless” describes authentication to the service: no password is sent to
+the server. A passphrase is still used locally to unlock the encrypted private
+key. This is not WebAuthn/FIDO or production IAM.
+
+## What happens in this lab
 
 ```mermaid
-flowchart LR
-    Admin["Trusted administrator CLI<br/>identity · authorize · revoke · replace"]
-    Credential["Credential-v1<br/>encrypted local RSA key"]
-    Client["Client CLI<br/>unlock · enroll · authenticate"]
-    API["Flask loopback API<br/>bind · challenge · verify"]
-    State[("SQLite<br/>lifecycle state + security events")]
-    Inspect["Local inspection<br/>inventory · events · findings"]
+flowchart TB
+    Join["1. Approve device → create & prove key"]
+    Login["2. Log in"]
+    Replace["3. Revoke → replace with new key"]
+    Inspect["4. Inspect events"]
 
-    Admin -->|lifecycle transactions| State
-    Credential --> Client
-    Client -->|RSA-PSS proofs| API
-    API -->|validated transitions| State
-    State --> Inspect
+    Join --> Login --> Replace --> Inspect
 ```
 
-## What the lifecycle enforces
+The administrator first grants temporary permission for one identity and one
+device. The device creates its private key and proves that it owns it. Each login
+then requires the device to sign a new challenge from the server.
 
-- Enrollment authorizations are scoped, expiring, and single-use; binding
-  requires RSA-PSS proof of possession, while an uncertain response can
-  reconcile only the same committed key.
-- Credential-v1 uses Argon2id and AES-256-GCM, no-overwrite publication, and
-  local unlock before challenge issuance.
-- PKAS-AUTH-V2 signs a context-bound RSA-PSS challenge; SQLite allows each
-  expiring challenge to succeed once, including under concurrent verification.
-- Revocation is terminal, and replacement revokes first before enrolling a
-  distinct binding and key.
-- Authoritative state changes and success events commit together; denial
-  evidence and derived findings remain bounded and cautiously attributed.
+If the device is revoked, it cannot log in again. Its replacement creates a
+different key rather than restoring the old one. The project calls each approved
+device-and-key relationship an **authenticator binding**; its lifecycle and the
+important denied requests remain available for inspection.
 
-## Important boundaries
+## Run the lifecycle
 
-- The trusted local OS account is the administration boundary; mutually
-  untrusted local users are outside scope.
-- Enrollment uses loopback HTTP. The lab does not claim protected-channel or
-  phishing resistance.
-- Credentials are software, passphrase-protected application files—not
-  hardware-backed storage or protection from same-account malware.
-- Events share the local SQLite and OS boundary. They are not tamper-proof,
-  independently attributable, centrally retained, or automated alerts.
+The walkthrough uses PowerShell and Python 3.12. Download or clone the
+repository, then open an ordinary PowerShell terminal in its directory.
 
-## Prerequisite
+### Prerequisite
 
-Python 3.12 is required. In an ordinary interactive PowerShell terminal, check
-the interpreter before creating the project environment:
+Check the installed interpreter:
 
 ```powershell
 python --version
 ```
 
-Continue only if this reports `Python 3.12.x`. On Windows, install Python from
-the official [Python 3.12.10 release page](https://www.python.org/downloads/release/python-31210/)
-if it is missing. Python 3.12.10 was the last 3.12 release with official Windows
-binary installers; [later 3.12 security releases are source-only](https://www.python.org/downloads/release/python-31213/).
-If the Python Launcher is available but `python` is not, use
-`py -3.12 --version` for the check and `py -3.12 -m venv .venv` below.
+Continue only if this reports `Python 3.12.x`. On Windows, use the official
+[Python 3.12.10 release](https://www.python.org/downloads/release/python-31210/)
+if Python is missing. It was the last 3.12 release with official Windows binary
+installers; [later 3.12 security releases are source-only](https://www.python.org/downloads/release/python-31213/).
 
-Application packages belong in the project virtual environment. The
-`requirements.txt` file supplies Flask, `cryptography`, Requests, and their
-transitive dependencies through pip. The normal Windows installation uses
-`cryptography`'s [published wheel](https://cryptography.io/en/latest/installation/),
-so Rust, OpenSSL, and compiler toolchains are not normal prerequisites.
-
-## Run the lab
-
-Use an ordinary interactive PowerShell terminal. The client refuses to read
-secrets when hidden input is unavailable.
-
-### Terminal 1: prepare, initialize, and start the API
+If the Python Launcher is available instead of `python`, use `py -3.12` for the
+version check and virtual-environment command.
 
 ```powershell
-python --version
+py -3.12 --version
+```
+
+### 1. Prepare and start the service
+
+In the first terminal, create the project environment with one of these
+commands:
+
+```powershell
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-python manage.py init
-python server.py
 ```
-
-Leave the server running. This first walkthrough creates persistent local state
-under `%LOCALAPPDATA%\PublicKeyAuthenticationSystem`; set
-`PKAS_DATABASE_PATH` if you want a separate SQLite instance.
-
-### Terminal 2: activate the environment, then enroll and authenticate
 
 ```powershell
-.\.venv\Scripts\Activate.ps1
-python manage.py identity-add demo
-python manage.py enrollment-issue demo laptop
+# Python Launcher alternative
+py -3.12 -m venv .venv
 ```
 
-`enrollment-issue` displays an authorization ID and bearer secret once. Copy the
-ID into the next command; the client prompts for the secret so it stays out of
-command history. Choose a new passphrase of at least 15 characters.
+Run only the command that matches your interpreter. Then install the
+dependencies, initialize the local database, and start the service:
 
 ```powershell
-python client.py enroll demo laptop AUTHORIZATION_ID
-python client.py login demo laptop
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe manage.py init
+.\.venv\Scripts\python.exe server.py
 ```
 
-Enrollment returns `created`; login returns `success`.
+Leave this terminal running. The lab stores its normal local state under
+`%LOCALAPPDATA%\PublicKeyAuthenticationSystem`. Set `PKAS_DATABASE_PATH` before
+initialization if you want to use a separate SQLite database.
 
-### Contain the original binding and replace it
+### 2. Approve a device, then log in
+
+In a second terminal, create a logical identity and approve a device named
+`laptop`:
 
 ```powershell
-python manage.py replacement-prepare demo laptop replacement suspected_compromise
+.\.venv\Scripts\python.exe manage.py identity-add demo
+.\.venv\Scripts\python.exe manage.py enrollment-issue demo laptop
 ```
 
-This terminally revokes `laptop` and displays a replacement authorization ID and
-bearer secret. Before using it, try the old credential again:
+This temporary permission applies only to `demo` and `laptop`. It expires and
+can be used once. `enrollment-issue` displays an authorization ID and bearer
+secret once.
+
+Now let the device create its private key and prove that it owns it. Copy the
+authorization ID into the next command. The client prompts for the secret so it
+does not enter command history, then asks for a new credential passphrase of at
+least 15 characters.
 
 ```powershell
-python client.py login demo laptop
+.\.venv\Scripts\python.exe client.py enroll demo laptop AUTHORIZATION_ID
 ```
 
-This denial is expected: the command reports `authentication_denied` and exits
-nonzero because a revoked binding cannot receive a challenge. It proves that a
-request targeted a revoked binding and was rejected. It does not prove that the
-original private key, credential, or authenticator generated that request.
-
-Enroll the distinct replacement with the authorization ID from
-`replacement-prepare`, then authenticate with it:
+Enrollment reports `created`. Try logging in: the server sends a fresh
+challenge and the device signs it.
 
 ```powershell
-python client.py enroll demo replacement REPLACEMENT_AUTHORIZATION_ID
-python client.py login demo replacement
+.\.venv\Scripts\python.exe client.py login demo laptop
 ```
 
-### Inspect the result
+Authentication reports `success`.
+
+### 3. Revoke the old device
+
+Now assume `laptop` should no longer be trusted. Prepare a replacement named
+`replacement`:
 
 ```powershell
-python manage.py inventory --user-id demo
-python manage.py events --user-id demo
-python manage.py investigate --user-id demo --device-id laptop
+.\.venv\Scripts\python.exe manage.py replacement-prepare demo laptop replacement suspected_compromise
 ```
 
-Inventory shows the original `laptop` binding as revoked and `replacement` as
-active. Events are chronological, sanitized local evidence. The bounded
-investigation links the replacement preparation and the denied old-binding
-request as `post_revocation_targeting`; it makes no claim about who sent that
-request.
+This permanently revokes `laptop` before granting temporary permission for the
+replacement. Try logging in with the old device again:
 
-Restricted Windows environments may enforce application-control policy against
-native Python extensions. In the fresh Windows Sandbox tested for this project,
-Windows Application Control blocked `cryptography`'s `_rust.pyd` at runtime
-after package installation succeeded. Do not disable security controls to run
-the lab; use an environment where the required packages are permitted, or
-consult the system administrator.
+```powershell
+.\.venv\Scripts\python.exe client.py login demo laptop
+```
 
-## Project map
+The command reports `authentication_denied` and exits nonzero. The old device
+cannot receive another challenge.
 
-| Path | Responsibility |
-|---|---|
-| `manage.py` | Trusted-local lifecycle and inspection commands |
-| `client.py` / `credential_store.py` | Enrollment, authentication, Credential-v1 custody, and migration |
-| `server.py` / `crypto_utils.py` | HTTP boundary and RSA-PSS protocol operations |
-| `db_utils.py` | SQLite lifecycle, transactions, evidence, and analysis |
-| `tests/` | Protocol, migration, rollback, concurrency, and failure evidence |
-| `docs/` | Lifecycle, credential-storage, and security-evidence details |
+That denial proves that a request targeted the revoked binding and was rejected.
+It does not prove who sent the request or whether the old private key was used.
 
-## Validation
+### 4. Add the replacement
 
-CI compiles and runs the full suite on Python 3.12 for Windows and Ubuntu. Run
-the same checks locally:
+The replacement creates and proves a new key; it does not inherit the old one.
+Use the authorization ID and secret displayed by `replacement-prepare`:
+
+```powershell
+.\.venv\Scripts\python.exe client.py enroll demo replacement REPLACEMENT_AUTHORIZATION_ID
+.\.venv\Scripts\python.exe client.py login demo replacement
+```
+
+The replacement is now a new authenticator binding. It does not restore or
+alter the revoked one.
+
+### 5. Inspect what happened
+
+```powershell
+.\.venv\Scripts\python.exe manage.py inventory --user-id demo
+.\.venv\Scripts\python.exe manage.py events --user-id demo
+.\.venv\Scripts\python.exe manage.py investigate --user-id demo --device-id laptop
+```
+
+Inventory shows `laptop` as revoked and `replacement` as active. The event
+timeline shows the lifecycle in chronological order.
+
+Because the walkthrough deliberately targeted the old binding after revocation,
+the investigation reports `post_revocation_targeting`. The finding links to the
+events that support it and repeats the limit on attribution.
+
+## What was engineered
+
+The visible walkthrough is small. Most of the engineering work is in the rules
+around each transition.
+
+### Controlled enrollment
+
+A device cannot add itself. The trusted local administrator first grants
+permission for one identity and one device. This permission is called an
+enrollment authorization: it expires and can be used only once. The client then
+proves possession of the private key it wants to bind using RSA-PSS.
+
+If the response is lost after a successful commit, an exact retry can reconcile
+the same key without creating another binding.
+
+### Protected local credential
+
+The private key remains in a passphrase-protected Credential-v1 file. The client
+validates and publishes that file without overwriting an existing credential.
+Once an enrollment request may have reached the service, the same credential is
+retained so an uncertain result can be retried safely.
+
+### One challenge, one success
+
+Authentication uses RSA-PSS over a context that binds the challenge to the
+identity, authenticator, and public key. Challenges expire and can succeed only
+once. Transaction ordering ensures that concurrent verification or revocation
+cannot turn one challenge into multiple successes.
+
+### Evidence without overclaiming
+
+Authoritative state changes and their success events commit together. If event
+insertion fails, the state transition rolls back. Bounded investigation can
+identify repeated invalid signatures, replay after a recorded success, and
+requests targeting a revoked binding while keeping observation separate from
+actor attribution.
+
+## How the behavior is checked
+
+The tests exercise security boundaries rather than only happy-path output. They
+cover:
+
+- competing enrollment, authentication, revocation, and replacement operations;
+- replay, expiry, context tampering, and legacy-protocol downgrade attempts;
+- credential publication races and uncertain enrollment responses;
+- rollback when state or evidence cannot commit safely;
+- schema recognition and explicit migration from supported legacy state; and
+- process-level operation through a real loopback HTTP server.
+
+CI compiles the project and runs the full suite on Python 3.12 for Windows and
+Ubuntu.
+
+Run the validation locally:
 
 ```powershell
 .\.venv\Scripts\python.exe -m compileall -q .
@@ -183,11 +230,45 @@ the same checks locally:
 .\.venv\Scripts\python.exe -m pip check
 ```
 
-## Design notes
+## Where the model stops
 
-- [Authenticator lifecycle](docs/authenticator-lifecycle.md)
-- [Credential storage](docs/credential-storage.md)
-- [Security evidence and findings](docs/security-evidence.md)
+- The trusted local OS account is the administration boundary. Mutually
+  untrusted users sharing one OS account are outside scope.
+- Enrollment and authentication use loopback HTTP. The lab does not provide a
+  protected remote channel or phishing-resistant authentication.
+- Credentials are software files. Passphrase protection does not provide
+  hardware-backed custody or protection from malware running as the same user.
+- Events share the local SQLite and OS trust boundary. They are not tamper-proof,
+  centrally retained, or independently attributable, and the derived findings
+  are not automated alerts.
 
-Existing v1, v2, or v3 SQLite state requires explicit migration; see the
-lifecycle note before running `.\.venv\Scripts\python.exe manage.py migrate`.
+The service returns authentication decisions; it does not create application
+sessions or act as a general identity provider.
+
+## Go deeper
+
+The [security design](docs/security-design.md) explains exactly how enrollment,
+credential custody, authentication, revocation, replacement, transactions,
+migrations, and evidence handling work.
+
+The [tests](tests/) are the executable evidence for the failure, concurrency,
+rollback, and end-to-end behavior described above.
+
+<details>
+<summary>Restricted Windows environments</summary>
+
+Some Windows hosts enforce application-control policy against native Python
+extensions. In one fresh Windows Sandbox used during project validation,
+Windows Application Control blocked `cryptography`'s `_rust.pyd` after package
+installation.
+
+This was a host-policy result, not a general claim about Windows Sandbox. Do not
+disable security controls to run the lab. Use an environment where the required
+package is permitted, or consult the system administrator.
+
+</details>
+
+## License
+
+This repository is intentionally published without an open-source license.
+Public visibility does not grant broad reuse rights.
