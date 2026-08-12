@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="460" height="244" viewBox="0 0 460 244" role="img" aria-labelledby="title description">
+  <title id="title">Authenticator lifecycle</title>
+  <desc id="description">Approve a device and create and prove its key, log in, revoke and replace it with a new key, then inspect events.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+      <path d="M0 0 L7 3.5 L0 7 Z" fill="#8c959f"/>
+    </marker>
+  </defs>
+
+  <g fill="#24292f" stroke="#8c959f" stroke-width="1.5">
+    <rect x="30" y="4" width="400" height="44" rx="6"/>
+    <rect x="30" y="68" width="400" height="44" rx="6"/>
+    <rect x="30" y="132" width="400" height="44" rx="6"/>
+    <rect x="30" y="196" width="400" height="44" rx="6"/>
+  </g>
+
+  <g fill="none" stroke="#8c959f" stroke-width="2" marker-end="url(#arrow)">
+    <path d="M230 52 V62"/>
+    <path d="M230 116 V126"/>
+    <path d="M230 180 V190"/>
+  </g>
+
+  <g fill="#f6f8fa" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" font-weight="600" text-anchor="middle">
+    <text x="230" y="31">1. Approve device → create &amp; prove key</text>
+    <text x="230" y="95">2. Log in</text>
+    <text x="230" y="159">3. Revoke → replace with new key</text>
+    <text x="230" y="223">4. Inspect events</text>
+  </g>
+</svg>

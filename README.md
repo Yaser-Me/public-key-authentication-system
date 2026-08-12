@@ -17,15 +17,9 @@ key. This is not WebAuthn/FIDO or production IAM.
 
 ## What happens in this lab
 
-```mermaid
-flowchart TB
-    Join["1. Approve device → create & prove key"]
-    Login["2. Log in"]
-    Replace["3. Revoke → replace with new key"]
-    Inspect["4. Inspect events"]
-
-    Join --> Login --> Replace --> Inspect
-```
+<p align="center">
+  <img src="docs/lifecycle.svg" alt="Lifecycle: approve a device and create and prove its key, log in, revoke and replace it with a new key, then inspect events.">
+</p>
 
 The administrator first grants temporary permission for one identity and one
 device. The device creates its private key and proves that it owns it. Each login
