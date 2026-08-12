@@ -53,14 +53,37 @@ flowchart LR
 - Events share the local SQLite and OS boundary. They are not tamper-proof,
   independently attributable, centrally retained, or automated alerts.
 
-## Run the lab
+## Prerequisite
 
-Use Python 3.12 and an ordinary interactive PowerShell terminal. The client
-refuses to read secrets when hidden input is unavailable.
-
-### Terminal 1: install, initialize, and start the API
+Python 3.12 is required. In an ordinary interactive PowerShell terminal, check
+the interpreter before creating the project environment:
 
 ```powershell
+python --version
+```
+
+Continue only if this reports `Python 3.12.x`. On Windows, install Python from
+the official [Python 3.12.10 release page](https://www.python.org/downloads/release/python-31210/)
+if it is missing. Python 3.12.10 was the last 3.12 release with official Windows
+binary installers; [later 3.12 security releases are source-only](https://www.python.org/downloads/release/python-31213/).
+If the Python Launcher is available but `python` is not, use
+`py -3.12 --version` for the check and `py -3.12 -m venv .venv` below.
+
+Application packages belong in the project virtual environment. The
+`requirements.txt` file supplies Flask, `cryptography`, Requests, and their
+transitive dependencies through pip. The normal Windows installation uses
+`cryptography`'s [published wheel](https://cryptography.io/en/latest/installation/),
+so Rust, OpenSSL, and compiler toolchains are not normal prerequisites.
+
+## Run the lab
+
+Use an ordinary interactive PowerShell terminal. The client refuses to read
+secrets when hidden input is unavailable.
+
+### Terminal 1: prepare, initialize, and start the API
+
+```powershell
+python --version
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
@@ -72,7 +95,7 @@ Leave the server running. This first walkthrough creates persistent local state
 under `%LOCALAPPDATA%\PublicKeyAuthenticationSystem`; set
 `PKAS_DATABASE_PATH` if you want a separate SQLite instance.
 
-### Terminal 2: activate the same environment, then enroll and authenticate
+### Terminal 2: activate the environment, then enroll and authenticate
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
@@ -131,6 +154,13 @@ investigation links the replacement preparation and the denied old-binding
 request as `post_revocation_targeting`; it makes no claim about who sent that
 request.
 
+Restricted Windows environments may enforce application-control policy against
+native Python extensions. In the fresh Windows Sandbox tested for this project,
+Windows Application Control blocked `cryptography`'s `_rust.pyd` at runtime
+after package installation succeeded. Do not disable security controls to run
+the lab; use an environment where the required packages are permitted, or
+consult the system administrator.
+
 ## Project map
 
 | Path | Responsibility |
@@ -160,4 +190,4 @@ the same checks locally:
 - [Security evidence and findings](docs/security-evidence.md)
 
 Existing v1, v2, or v3 SQLite state requires explicit migration; see the
-lifecycle note before running `python manage.py migrate`.
+lifecycle note before running `.\.venv\Scripts\python.exe manage.py migrate`.
